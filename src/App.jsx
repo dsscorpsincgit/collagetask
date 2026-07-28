@@ -55,7 +55,8 @@ const nav = [
 const workStatuses={available:{label:'Available',color:'#45c593'},busy:{label:'Busy',color:'#e46d77'},lunch:{label:'At lunch',color:'#eea153'},break:{label:'On break',color:'#8b7cf6'},in_meeting:{label:'In a meeting',color:'#4b8fd5'},offline:{label:'Offline',color:'#94a0b0'}};
 const initials = (name = '') => name.split(' ').map((n) => n[0]).join('').slice(0, 2).toUpperCase();
 const niceDate = (date) => date ? new Date(`${String(date).slice(0,10)}T00:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'No date';
-const today = new Date('2026-07-27T00:00:00');
+const today = new Date();
+today.setHours(0,0,0,0);
 
 function Avatar({ user, size = 30, className = '' }) {
   return <span className={`avatar ${className}`} style={{ width: size, height: size, background: user?.avatar_color || '#344159' }} title={user?.name}>{user ? initials(user.name) : '?'}</span>;
@@ -155,7 +156,7 @@ function App() {
         {page === 'projects' && <Projects data={data} setProjectId={setProjectId} setPage={setPage} setModal={setModal} updateProject={updateProject} canManage={canManageWorkspace}/>} 
         {page === 'board' && <Board data={data} project={activeProject} setProjectId={setProjectId} updateTask={updateTask} setModal={setModal} canManage={canManageWorkspace} canCreate={canManageWorkspace}/>} 
         {page === 'my-tasks' && <MyTasks data={data} currentUser={authUser} canCreate={canManageWorkspace} updateTask={updateTask} setModal={setModal}/>} 
-        {page === 'chat' && <ChatPage data={data} currentUser={authUser}/>} 
+        {page === 'chat' && <ModernChatPage data={data} currentUser={authUser}/>}
         {page === 'calendar' && <MeetingCalendar data={data} currentUser={authUser} setModal={setModal}/>} 
         {page === 'teams' && <Teams data={data} setModal={setModal} canManage={canManageWorkspace}/>} 
         {page === 'people' && canManageWorkspace && <People data={data} currentUser={authUser} setModal={setModal} updateUser={updateUser} canManage={canManageWorkspace}/>} 
@@ -183,6 +184,8 @@ function App() {
 }
 
 function Overview({ data, currentUser, canCreate, setPage, setProjectId, setModal }) {
+  const now=new Date(),hour=now.getHours(),greeting=hour<12?'Good morning':hour<17?'Good afternoon':'Good evening';
+  const dateLabel=now.toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric',year:'numeric'}).toUpperCase();
   const open = data.tasks.filter(t => t.status !== 'done'); const done = data.tasks.filter(t => t.status === 'done');
   const dueSoon = open.filter(t => t.due_date && (new Date(`${t.due_date}T00:00:00`) - today) / 86400000 <= 14);
   const activity = [
@@ -191,7 +194,7 @@ function Overview({ data, currentUser, canCreate, setPage, setProjectId, setModa
     { user: data.users[3], text: 'submitted a task for review', detail: 'Set up component test suite', time: '3 hrs ago' },
   ];
   return <>
-    <section className="page-heading"><div><span className="eyebrow">MONDAY, JULY 27</span><h1>Good morning, {currentUser.name.split(' ')[0]} <span>✦</span></h1><p>Here’s what’s moving across your workspace today.</p></div>{canCreate&&<button className="primary" onClick={() => setModal('task')}><Plus size={17}/> Create task</button>}</section>
+    <section className="page-heading"><div><span className="eyebrow">{dateLabel}</span><h1>{greeting}, {currentUser.name.split(' ')[0]} <span>✦</span></h1><p>Here’s what’s moving across your workspace today.</p></div>{canCreate&&<button className="primary" onClick={() => setModal('task')}><Plus size={17}/> Create task</button>}</section>
     <div className="stats-grid">
       <Stat icon={Layers3} color="cyan" label="Active projects" value={data.projects.filter(p=>p.status==='active').length} note="All progressing well" />
       <Stat icon={CheckSquare} color="purple" label="Open tasks" value={open.length} note={`${open.filter(t=>t.status==='in_progress').length} currently in progress`} />
@@ -226,6 +229,70 @@ function TaskCard({ task, data, onClick }) { const user=data.users.find(u=>u.id=
 function TaskLine({ task, data, onClick, updateTask }) { const project=data.projects.find(p=>p.id===task.project_id), user=data.users.find(u=>u.id===task.assignee_id); return <button className="task-line" onClick={onClick}><span className={`status-dot ${task.status}`}/><div className="tl-title"><strong>{task.title}</strong><span><i style={{background:project?.color}}/>{project?.name}</span></div><span className={`priority ${task.priority}`}><i/>{priorityMeta[task.priority]?.label}</span><span className="due"><CalendarDays size={14}/>{niceDate(task.due_date)}</span><Avatar user={user} size={28}/>{updateTask&&<select value={task.status} onClick={e=>e.stopPropagation()} onChange={e=>updateTask(task.id,{status:e.target.value})}>{Object.entries(statusMeta).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}</select>}</button> }
 
 function MyTasks({ data, currentUser, canCreate, updateTask, setModal }) { const [status,setStatus]=useState('open'); const mine=data.tasks.filter(t=>t.assignee_id===currentUser.id&&(status==='all'||(status==='open'?t.status!=='done':t.status===status))); return <><section className="page-heading compact"><div><span className="eyebrow">PERSONAL</span><h1>My tasks</h1><p>Everything assigned to you, across all projects.</p></div>{canCreate&&<button className="primary" onClick={()=>setModal('task')}><Plus size={17}/> New task</button>}</section><div className="list-panel"><div className="list-tools"><div className="view-tabs">{['open','todo','in_progress','done','all'].map(k=><button key={k} className={status===k?'active':''} onClick={()=>setStatus(k)}>{k==='open'?'Open':k==='all'?'All':statusMeta[k]?.label}</button>)}</div><span>{mine.length} tasks</span></div><div className="task-list-head"><span>Task</span><span>Priority</span><span>Due date</span><span>Owner</span><span>Status</span></div>{mine.length?mine.map(t=><TaskLine key={t.id} task={t} data={data} updateTask={updateTask} onClick={()=>setModal({type:'edit-task',task:t})}/>):<Empty icon={CircleCheck} title="You're all caught up" text="No tasks match this view."/>}</div></> }
+
+function ModernChatPage({data,currentUser}) {
+  const [channels,setChannels]=useState([]),[selectedId,setSelectedId]=useState(null),[messages,setMessages]=useState([]);
+  const [textValue,setTextValue]=useState(''),[files,setFiles]=useState([]),[busy,setBusy]=useState(false),[compose,setCompose]=useState(false);
+  const [emojiOpen,setEmojiOpen]=useState(false),[replyTo,setReplyTo]=useState(null),[forwardMessage,setForwardMessage]=useState(null),[forwardTargets,setForwardTargets]=useState([]),[actionMessage,setActionMessage]=useState(null);
+  const [mobile,setMobile]=useState(()=>window.matchMedia('(max-width:700px)').matches),[mobileOpen,setMobileOpen]=useState(false);
+  const touchStart=useRef(null),messagesEnd=useRef(null);
+  const activePeople=data.users.filter(user=>user.id!==currentUser.id&&user.status==='active'&&user.invitation_status==='accepted');
+  const channelName=channel=>channel?.channel_type==='team'?channel.name:(channel?.members?.find(member=>member.id!==currentUser.id)?.name||channel?.name||'Former employee');
+  const selected=channels.find(channel=>channel.id===selectedId)||null;
+  const selectedPerson=selected?.members?.find(member=>member.id!==currentUser.id);
+  const representedPeople=new Set(channels.filter(channel=>channel.channel_type==='direct').flatMap(channel=>channel.members||[]).filter(member=>member.id!==currentUser.id).map(member=>member.id));
+  const contacts=activePeople.filter(person=>!representedPeople.has(person.id));
+  const emojis=['😀','😂','😊','😍','🥳','😮','😢','😡','👍','👎','👏','🙏','💪','🎉','✅','❤️','🔥','👋','💯','🤝','📌','🚀','👀','🤔'];
+  const quickReactions=['👍','❤️','😂','😮','😢','🙏'];
+
+  const loadChannels=async(preferredId)=>{
+    const items=await api('/chat/channels');setChannels(items);
+    setSelectedId(current=>{const wanted=preferredId??current;if(wanted&&items.some(item=>item.id===wanted))return wanted;return mobile?null:(items[0]?.id||null)});
+    return items;
+  };
+  const loadMessages=async()=>{if(!selectedId)return setMessages([]);try{setMessages(await api(`/chat/channels/${selectedId}/messages`))}catch{setSelectedId(null);setMobileOpen(false);setMessages([]);await loadChannels()}};
+  useEffect(()=>{loadChannels()},[]);
+  useEffect(()=>{const media=window.matchMedia('(max-width:700px)'),change=event=>setMobile(event.matches);media.addEventListener('change',change);return()=>media.removeEventListener('change',change)},[]);
+  useEffect(()=>{if(!selectedId)return;loadMessages();const incoming=event=>{if(event.channel_id===selectedId)loadMessages();loadChannels(selectedId)};realtime.on('chat-message',incoming);const timer=setInterval(()=>{loadMessages();loadChannels(selectedId)},7000);return()=>{clearInterval(timer);realtime.off('chat-message',incoming)}},[selectedId]);
+  useEffect(()=>{messagesEnd.current?.scrollIntoView({block:'end'})},[messages.length,selectedId]);
+  useEffect(()=>{const back=()=>{if(mobileOpen)setMobileOpen(false)};window.addEventListener('popstate',back);return()=>window.removeEventListener('popstate',back)},[mobileOpen]);
+
+  const openChannel=id=>{setSelectedId(id);setActionMessage(null);if(mobile){history.pushState({dssChat:true},'');setMobileOpen(true)}};
+  const openPerson=async person=>{const channel=await api('/chat/channels',{method:'POST',body:JSON.stringify({channel_type:'direct',user_id:person.id})});await loadChannels(channel.id);openChannel(channel.id)};
+  const closeMobileConversation=()=>{setMobileOpen(false);setActionMessage(null)};
+  const sendMessage=async event=>{event.preventDefault();if(!textValue.trim()&&!files.length||!selectedId)return;setBusy(true);try{
+    if(files.length){for(let index=0;index<files.length;index++){const body=new FormData();body.append('files',files[index]);if(index===0){body.append('caption',textValue);if(replyTo)body.append('reply_to_id',replyTo.id)}const response=await fetch(`/api/chat/channels/${selectedId}/attachments`,{method:'POST',body});if(!response.ok){const result=await response.json().catch(()=>({}));throw new Error(result.error||'Upload failed')}}}
+    else await api(`/chat/channels/${selectedId}/messages`,{method:'POST',body:JSON.stringify({message:textValue,reply_to_id:replyTo?.id})});
+    setTextValue('');setFiles([]);setReplyTo(null);setEmojiOpen(false);await Promise.all([loadMessages(),loadChannels(selectedId)]);
+  }catch(error){alert(error.message)}finally{setBusy(false)}};
+  const react=async(message,emoji)=>{await api(`/chat/messages/${message.id}/reactions`,{method:'POST',body:JSON.stringify({emoji})});setActionMessage(null);await loadMessages()};
+  const forward=async()=>{if(!forwardMessage||!forwardTargets.length)return;setBusy(true);try{await api(`/chat/messages/${forwardMessage.id}/forward`,{method:'POST',body:JSON.stringify({channel_ids:forwardTargets})});setForwardMessage(null);setForwardTargets([]);await loadChannels(selectedId)}finally{setBusy(false)}};
+  const ticks=message=>{const recipients=Number(message.recipient_count||0),read=Number(message.read_count||0),delivered=Number(message.delivered_count||0);if(recipients>0&&read>=recipients)return <span className="message-ticks read" title="Read">✓✓</span>;if(delivered>0)return <span className="message-ticks" title="Delivered">✓✓</span>;return <span className="message-ticks" title="Sent">✓</span>};
+  const beginTouch=event=>{const point=event.touches[0];touchStart.current={x:point.clientX,y:point.clientY}};
+  const endTouch=event=>{if(!mobileOpen||!touchStart.current)return;const point=event.changedTouches[0],dx=point.clientX-touchStart.current.x,dy=Math.abs(point.clientY-touchStart.current.y);if(dx>65&&dx>dy)closeMobileConversation();touchStart.current=null};
+
+  return <>
+    <section className="page-heading compact chat-page-heading"><div><span className="eyebrow">INTERNAL COMMUNICATION</span><h1>Chat</h1><p>Private conversations, team channels, images, documents, and live presence.</p></div><button className="primary" onClick={()=>setCompose(true)}><Plus size={17}/> New conversation</button></section>
+    <div className={`chat-shell modern-chat ${mobileOpen?'mobile-conversation-open':''}`} onTouchStart={beginTouch} onTouchEnd={endTouch}>
+      <aside className="chat-channels">
+        <div className="chat-channel-head"><strong>Messages</strong><span>{channels.length} conversations</span></div>
+        {channels.map(channel=>{const person=channel.members?.find(member=>member.id!==currentUser.id),presence=workStatuses[person?.work_status]||workStatuses.offline;return <button key={channel.id} className={selectedId===channel.id?'active':''} onClick={()=>openChannel(channel.id)}><span className={`channel-avatar ${channel.channel_type}`}>{channel.channel_type==='team'?<Hash size={16}/>:<span className="presence-avatar"><Avatar user={person} size={38}/>{person&&<i style={{background:presence.color}}/>}</span>}</span><div><strong>{channelName(channel)}</strong><p>{channel.last_message||'Start a conversation'}</p></div>{channel.last_message_at&&<small>{new Date(channel.last_message_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</small>}</button>})}
+        {contacts.length>0&&<div className="chat-contacts"><strong>People</strong>{contacts.map(person=>{const presence=workStatuses[person.work_status]||workStatuses.offline;return <button key={person.id} onClick={()=>openPerson(person)}><span className="presence-avatar"><Avatar user={person} size={36}/><i style={{background:presence.color}}/></span><span><b>{person.name}</b><small>{presence.label}{person.status_note?` · ${person.status_note}`:''}</small></span><MessageCircle size={16}/></button>})}</div>}
+      </aside>
+      <section className="chat-conversation">
+        {selected?<>
+          <header><button className="chat-mobile-back" onClick={closeMobileConversation} aria-label="Back to conversations"><ChevronLeft/></button><div className="channel-avatar team">{selected.channel_type==='team'?<Hash size={17}/>:<Avatar user={selectedPerson} size={38}/>}</div><div><strong>{channelName(selected)}</strong><span>{selected.channel_type==='team'?`${selected.members?.length||0} team members`:`${(workStatuses[selectedPerson?.work_status]||workStatuses.offline).label}${selectedPerson?.status_note?` · ${selectedPerson.status_note}`:''}`}</span></div>{selected.channel_type==='team'&&<div className="avatars-stack">{selected.members?.slice(0,5).map(user=><Avatar key={user.id} user={user}/>)}</div>}</header>
+          <div className="chat-messages">{messages.map((message,index)=>{const own=message.user_id===currentUser.id,showName=index===0||messages[index-1].user_id!==message.user_id;return <div key={message.id} className={`chat-bubble-row ${own?'own':''}`} onClick={()=>setActionMessage(actionMessage===message.id?null:message.id)}>{!own&&<Avatar user={{name:message.user_name,avatar_color:message.avatar_color}} size={29}/>}<div className="message-wrap">{showName&&!own&&<strong>{message.user_name}</strong>}<div className="message-bubble">{message.forwarded_from_id&&<span className="forwarded-label">↪ Forwarded</span>}{message.reply_to_id&&<div className="reply-quote"><b>{message.reply_user_name}</b><span>{message.reply_message||'Attachment'}</span></div>}{message.attachments?.length>0&&<div className="chat-attachments">{message.attachments.map(file=>file.mime_type.startsWith('image/')?<a key={file.id} href={`/api/chat/attachments/${file.id}`} target="_blank" rel="noreferrer"><img src={`/api/chat/attachments/${file.id}`} alt={file.filename}/><span>{file.filename}</span></a>:<a key={file.id} className="chat-file" href={`/api/chat/attachments/${file.id}`} download><FileText/><span><b>{file.filename}</b><small>{Math.ceil(file.file_size/1024)} KB</small></span><Download/></a>)}</div>}{message.message&&<p>{message.message}</p>}<small>{new Date(message.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}{own&&ticks(message)}</small></div>{message.reactions?.length>0&&<div className="message-reactions">{message.reactions.map(reaction=><button className={reaction.reacted?'mine':''} key={reaction.emoji} onClick={event=>{event.stopPropagation();react(message,reaction.emoji)}}>{reaction.emoji} {reaction.count}</button>)}</div>}{actionMessage===message.id&&<div className="message-actions" onClick={event=>event.stopPropagation()}><button onClick={()=>{setReplyTo(message);setActionMessage(null)}}>↩ Reply</button>{quickReactions.map(emoji=><button className="reaction-action" key={emoji} onClick={()=>react(message,emoji)}>{emoji}</button>)}<button onClick={()=>{setForwardMessage(message);setForwardTargets([]);setActionMessage(null)}}>↪ Forward</button></div>}</div></div>})}<div ref={messagesEnd}/></div>
+          {replyTo&&<div className="composer-reply"><span><b>Replying to {replyTo.user_name}</b>{replyTo.message||'Attachment'}</span><button onClick={()=>setReplyTo(null)}><X/></button></div>}
+          {files.length>0&&<div className="chat-file-preview"><Paperclip/><span>{files.map(file=>file.name).join(', ')}</span><button onClick={()=>setFiles([])}><X/></button></div>}
+          <form className="chat-compose" onSubmit={sendMessage}><div className="compose-tools"><button type="button" onClick={()=>setEmojiOpen(!emojiOpen)}>☺</button><label><Paperclip/><input type="file" multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip" onChange={event=>setFiles([...event.target.files])}/></label>{emojiOpen&&<div className="emoji-picker modern"><header><b>Emoji</b><button type="button" onClick={()=>setEmojiOpen(false)}><X/></button></header><div>{emojis.map(emoji=><button type="button" key={emoji} onClick={()=>setTextValue(value=>value+emoji)}>{emoji}</button>)}</div></div>}</div><textarea value={textValue} onChange={event=>setTextValue(event.target.value)} required={!files.length} placeholder={`Message ${channelName(selected)}...`} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();event.currentTarget.form.requestSubmit()}}}/><button className="primary" disabled={busy}><Send size={16}/></button></form>
+        </>:<Empty icon={MessageCircle} title="Choose a conversation" text="Select a colleague or team to start messaging."/>}
+      </section>
+    </div>
+    {compose&&<NewConversation data={data} currentUser={currentUser} onClose={()=>setCompose(false)} onCreated={async channel=>{setCompose(false);await loadChannels(channel.id);openChannel(channel.id)}}/>}
+    {forwardMessage&&<Modal title="Forward message" subtitle="Select one or more conversations." onClose={()=>{setForwardMessage(null);setForwardTargets([])}}><div className="forward-preview">{forwardMessage.message||'Image or document'}</div><div className="forward-list">{channels.map(channel=><button type="button" key={channel.id} className={forwardTargets.includes(channel.id)?'selected':''} onClick={()=>setForwardTargets(items=>items.includes(channel.id)?items.filter(id=>id!==channel.id):[...items,channel.id])}><Avatar user={channel.channel_type==='direct'?channel.members?.find(member=>member.id!==currentUser.id):{name:channel.name}} size={34}/><span>{channelName(channel)}</span>{forwardTargets.includes(channel.id)&&<CircleCheck/>}</button>)}</div><div className="modal-actions forward-actions"><span>{forwardTargets.length} selected</span><div><button className="secondary" onClick={()=>setForwardMessage(null)}>Cancel</button><button className="primary" disabled={!forwardTargets.length||busy} onClick={forward}><Send/> Forward</button></div></div></Modal>}
+  </>;
+}
 
 function ChatPage({data,currentUser}) {
   const [channels,setChannels]=useState([]),[selectedId,setSelectedId]=useState(null),[messages,setMessages]=useState([]),[textValue,setTextValue]=useState(''),[compose,setCompose]=useState(false),[busy,setBusy]=useState(false),[files,setFiles]=useState([]),[emojiOpen,setEmojiOpen]=useState(false);

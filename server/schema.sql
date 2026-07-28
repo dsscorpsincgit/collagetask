@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS invitations (
 );
 
 ALTER TABLE invitations ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS task_attachments (
   id SERIAL PRIMARY KEY,
@@ -120,6 +121,25 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   message TEXT NOT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_to_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL;
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS forwarded_from_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS chat_message_receipts (
+  message_id INTEGER REFERENCES chat_messages(id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  delivered_at TIMESTAMPTZ DEFAULT NOW(),
+  read_at TIMESTAMPTZ,
+  PRIMARY KEY (message_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS chat_message_reactions (
+  message_id INTEGER REFERENCES chat_messages(id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  emoji VARCHAR(20) NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (message_id, user_id, emoji)
 );
 
 CREATE TABLE IF NOT EXISTS chat_attachments (
@@ -184,5 +204,7 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, crea
 CREATE INDEX IF NOT EXISTS idx_chat_messages_channel ON chat_messages(channel_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_chat_attachments_message ON chat_attachments(message_id);
 CREATE INDEX IF NOT EXISTS idx_chat_members_user ON chat_channel_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_chat_receipts_user ON chat_message_receipts(user_id, read_at);
+CREATE INDEX IF NOT EXISTS idx_chat_reactions_message ON chat_message_reactions(message_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_attendees_user ON meeting_attendees(user_id);
 CREATE INDEX IF NOT EXISTS idx_meetings_start ON meetings(start_at);

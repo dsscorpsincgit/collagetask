@@ -130,6 +130,7 @@ async function initDatabase() {
   }
   await sql`INSERT INTO chat_channels (name, channel_type, team_id) SELECT t.name, 'team', t.id FROM teams t WHERE NOT EXISTS (SELECT 1 FROM chat_channels c WHERE c.team_id=t.id)`;
   await sql`INSERT INTO chat_channel_members (channel_id, user_id) SELECT c.id, tm.user_id FROM chat_channels c JOIN team_members tm ON tm.team_id=c.team_id WHERE c.channel_type='team' ON CONFLICT DO NOTHING`;
+  await sql`UPDATE invitations i SET status='accepted',accepted_at=COALESCE(i.accepted_at,NOW()) FROM users u WHERE (i.user_id=u.id OR LOWER(i.email)=LOWER(u.email)) AND i.status='pending' AND u.must_change_password=FALSE`;
   syncAppRelease().catch(error=>console.error('Release announcement failed:',error));
 }
 
@@ -159,6 +160,7 @@ app.post('/api/auth/login', async (req, res) => {
       const expires = new Date(Date.now() + SESSION_DAYS * 86400000);
       await sql`DELETE FROM sessions WHERE expires_at < NOW()`;
       await sql`INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (${hashToken(token)}, ${user.id}, ${expires})`;
+      await sql`UPDATE invitations SET status='accepted', accepted_at=COALESCE(accepted_at,NOW()) WHERE LOWER(email)=${email} AND status<>'accepted'`;
       res.cookie(SESSION_COOKIE, token, cookieOptions);
     }
     const { password_hash, ...safeUser } = user;
@@ -216,9 +218,9 @@ app.get('/api/dashboard', async (req, res) => {
   try {
     if (!sql) return res.json(demo);
     const [users, teamsRaw, projects, tasks, invitations, links, notifications, meetingsRaw, meetingLinks] = await Promise.all([
-      sql`SELECT id, name, email, role, avatar_color, status, work_status, status_note, status_updated_at, created_at FROM users ORDER BY name`, sql`SELECT * FROM teams ORDER BY created_at`,
+      sql`SELECT u.id,u.name,u.email,u.role,u.avatar_color,u.status,u.work_status,u.status_note,u.status_updated_at,u.created_at,COALESCE((SELECT i.status FROM invitations i WHERE i.user_id=u.id OR LOWER(i.email)=LOWER(u.email) ORDER BY i.created_at DESC LIMIT 1),'accepted') AS invitation_status FROM users u ORDER BY u.name`, sql`SELECT * FROM teams ORDER BY created_at`,
       sql`SELECT * FROM projects ORDER BY created_at`, sql`SELECT * FROM tasks ORDER BY created_at`,
-      sql`SELECT * FROM invitations ORDER BY created_at DESC`, sql`SELECT * FROM team_members`,
+      sql`SELECT * FROM invitations WHERE status='pending' ORDER BY created_at DESC`, sql`SELECT * FROM team_members`,
       sql`SELECT n.*, a.name AS actor_name FROM notifications n LEFT JOIN users a ON a.id=n.actor_id WHERE n.user_id=${req.user.id} ORDER BY n.created_at DESC LIMIT 40`,
       sql`SELECT m.*, u.name AS organizer_name FROM meetings m LEFT JOIN users u ON u.id=m.organizer_id WHERE m.organizer_id=${req.user.id} OR EXISTS (SELECT 1 FROM meeting_attendees ma WHERE ma.meeting_id=m.id AND ma.user_id=${req.user.id}) ORDER BY m.start_at`,
       sql`SELECT ma.* FROM meeting_attendees ma WHERE ma.meeting_id IN (SELECT m.id FROM meetings m WHERE m.organizer_id=${req.user.id} OR EXISTS (SELECT 1 FROM meeting_attendees x WHERE x.meeting_id=m.id AND x.user_id=${req.user.id}))`,
@@ -372,8 +374,21 @@ app.post('/api/teams', requireWorkspaceManager, async (req, res) => {
 
 app.get('/api/chat/channels', async (req, res) => {
   try {
-    const channels = await sql`SELECT c.*, (SELECT message FROM chat_messages cm WHERE cm.channel_id=c.id ORDER BY cm.created_at DESC LIMIT 1) AS last_message, (SELECT created_at FROM chat_messages cm WHERE cm.channel_id=c.id ORDER BY cm.created_at DESC LIMIT 1) AS last_message_at FROM chat_channels c WHERE EXISTS (SELECT 1 FROM chat_channel_members m WHERE m.channel_id=c.id AND m.user_id=${req.user.id}) ORDER BY COALESCE((SELECT created_at FROM chat_messages cm WHERE cm.channel_id=c.id ORDER BY cm.created_at DESC LIMIT 1), c.created_at) DESC`;
-    const members = await sql`SELECT m.channel_id, u.id, u.name, u.avatar_color, u.role FROM chat_channel_members m JOIN users u ON u.id=m.user_id WHERE m.channel_id IN (SELECT channel_id FROM chat_channel_members WHERE user_id=${req.user.id})`;
+    await sql`INSERT INTO chat_message_receipts(message_id,user_id,delivered_at)
+      SELECT cm.id,${req.user.id},NOW() FROM chat_messages cm
+      JOIN chat_channel_members mine ON mine.channel_id=cm.channel_id AND mine.user_id=${req.user.id}
+      WHERE cm.user_id<>${req.user.id}
+      ON CONFLICT(message_id,user_id) DO UPDATE SET delivered_at=COALESCE(chat_message_receipts.delivered_at,NOW())`;
+    const channels = await sql`SELECT c.*,
+      (SELECT COALESCE(NULLIF(cm.message,''),'Attachment') FROM chat_messages cm WHERE cm.channel_id=c.id ORDER BY cm.created_at DESC LIMIT 1) AS last_message,
+      (SELECT created_at FROM chat_messages cm WHERE cm.channel_id=c.id ORDER BY cm.created_at DESC LIMIT 1) AS last_message_at
+      FROM chat_channels c
+      WHERE EXISTS (SELECT 1 FROM chat_channel_members m WHERE m.channel_id=c.id AND m.user_id=${req.user.id})
+      AND (c.channel_type<>'direct' OR (SELECT COUNT(*) FROM chat_channel_members m WHERE m.channel_id=c.id)>1)
+      ORDER BY COALESCE((SELECT created_at FROM chat_messages cm WHERE cm.channel_id=c.id ORDER BY cm.created_at DESC LIMIT 1),c.created_at) DESC`;
+    const members = await sql`SELECT m.channel_id,u.id,u.name,u.avatar_color,u.role,u.work_status,u.status_note,u.status
+      FROM chat_channel_members m JOIN users u ON u.id=m.user_id
+      WHERE u.status='active' AND m.channel_id IN (SELECT channel_id FROM chat_channel_members WHERE user_id=${req.user.id})`;
     res.json(channels.map(c=>({...c,members:members.filter(m=>m.channel_id===c.id)})));
   } catch (error) { sendError(res, error); }
 });
@@ -390,25 +405,53 @@ app.post('/api/chat/channels', async (req, res) => {
     }
     const targetId=Number(req.body.user_id); if(!targetId||targetId===req.user.id)return res.status(400).json({error:'Choose another person'});
     let [channel]=await sql`SELECT c.* FROM chat_channels c WHERE c.channel_type='direct' AND EXISTS(SELECT 1 FROM chat_channel_members m WHERE m.channel_id=c.id AND m.user_id=${req.user.id}) AND EXISTS(SELECT 1 FROM chat_channel_members m WHERE m.channel_id=c.id AND m.user_id=${targetId}) AND (SELECT COUNT(*) FROM chat_channel_members m WHERE m.channel_id=c.id)=2`;
-    if(!channel){const[target]=await sql`SELECT name FROM users WHERE id=${targetId}`;if(!target)return res.status(404).json({error:'Person not found'});[channel]=await sql`INSERT INTO chat_channels(name,channel_type,created_by) VALUES(${target.name},'direct',${req.user.id}) RETURNING *`;await sql`INSERT INTO chat_channel_members(channel_id,user_id) VALUES(${channel.id},${req.user.id}),(${channel.id},${targetId})`;}
+    if(!channel){const[target]=await sql`SELECT u.name FROM users u WHERE u.id=${targetId} AND u.status='active' AND (NOT EXISTS(SELECT 1 FROM invitations i WHERE i.user_id=u.id OR LOWER(i.email)=LOWER(u.email)) OR EXISTS(SELECT 1 FROM invitations i WHERE (i.user_id=u.id OR LOWER(i.email)=LOWER(u.email)) AND i.status='accepted'))`;if(!target)return res.status(404).json({error:'This employee has not accepted the invitation yet'});[channel]=await sql`INSERT INTO chat_channels(name,channel_type,created_by) VALUES(${target.name},'direct',${req.user.id}) RETURNING *`;await sql`INSERT INTO chat_channel_members(channel_id,user_id) VALUES(${channel.id},${req.user.id}),(${channel.id},${targetId})`;}
     res.status(201).json(channel);
   } catch (error) { sendError(res, error); }
 });
 
 app.get('/api/chat/channels/:id/messages', async (req, res) => {
-  try { const channelId=Number(req.params.id);const[member]=await sql`SELECT 1 FROM chat_channel_members WHERE channel_id=${channelId} AND user_id=${req.user.id}`;if(!member)return res.status(403).json({error:'Chat access denied'});const messages=await sql`SELECT m.*,u.name AS user_name,u.avatar_color FROM chat_messages m LEFT JOIN users u ON u.id=m.user_id WHERE m.channel_id=${channelId} ORDER BY m.created_at LIMIT 300`;const attachments=await sql`SELECT a.id,a.message_id,a.filename,a.mime_type,a.file_size FROM chat_attachments a WHERE a.message_id IN (SELECT id FROM chat_messages WHERE channel_id=${channelId})`;res.json(messages.map(m=>({...m,attachments:attachments.filter(a=>a.message_id===m.id)}))); } catch(error){sendError(res,error);}
+  try {
+    const channelId=Number(req.params.id);
+    const[member]=await sql`SELECT 1 FROM chat_channel_members WHERE channel_id=${channelId} AND user_id=${req.user.id}`;
+    if(!member)return res.status(403).json({error:'Chat access denied'});
+    await sql`INSERT INTO chat_message_receipts(message_id,user_id,delivered_at,read_at)
+      SELECT id,${req.user.id},NOW(),NOW() FROM chat_messages WHERE channel_id=${channelId} AND user_id<>${req.user.id}
+      ON CONFLICT(message_id,user_id) DO UPDATE SET delivered_at=COALESCE(chat_message_receipts.delivered_at,NOW()),read_at=NOW()`;
+    const messages=await sql`SELECT m.*,COALESCE(u.name,'Former employee') AS user_name,u.avatar_color,
+      reply.message AS reply_message,COALESCE(reply_user.name,'Former employee') AS reply_user_name,
+      (SELECT COUNT(*)::int FROM chat_channel_members cm WHERE cm.channel_id=m.channel_id AND cm.user_id<>m.user_id) AS recipient_count,
+      (SELECT COUNT(*)::int FROM chat_message_receipts r WHERE r.message_id=m.id AND r.delivered_at IS NOT NULL) AS delivered_count,
+      (SELECT COUNT(*)::int FROM chat_message_receipts r WHERE r.message_id=m.id AND r.read_at IS NOT NULL) AS read_count
+      FROM chat_messages m LEFT JOIN users u ON u.id=m.user_id
+      LEFT JOIN chat_messages reply ON reply.id=m.reply_to_id LEFT JOIN users reply_user ON reply_user.id=reply.user_id
+      WHERE m.channel_id=${channelId} ORDER BY m.created_at LIMIT 300`;
+    const attachments=await sql`SELECT a.id,a.message_id,a.filename,a.mime_type,a.file_size FROM chat_attachments a WHERE a.message_id IN (SELECT id FROM chat_messages WHERE channel_id=${channelId})`;
+    const reactions=await sql`SELECT r.message_id,r.emoji,COUNT(*)::int AS count,BOOL_OR(r.user_id=${req.user.id}) AS reacted FROM chat_message_reactions r WHERE r.message_id IN (SELECT id FROM chat_messages WHERE channel_id=${channelId}) GROUP BY r.message_id,r.emoji ORDER BY MIN(r.created_at)`;
+    res.json(messages.map(m=>({...m,attachments:attachments.filter(a=>a.message_id===m.id),reactions:reactions.filter(r=>r.message_id===m.id)})));
+  } catch(error){sendError(res,error);}
 });
 
 app.post('/api/chat/channels/:id/messages', async (req, res) => {
-  const channelId=Number(req.params.id),message=String(req.body.message||'').trim();if(!message)return res.status(400).json({error:'Write a message first'});
-  try { const[member]=await sql`SELECT 1 FROM chat_channel_members WHERE channel_id=${channelId} AND user_id=${req.user.id}`;if(!member)return res.status(403).json({error:'Chat access denied'});const[channel]=await sql`SELECT * FROM chat_channels WHERE id=${channelId}`;const[item]=await sql`INSERT INTO chat_messages(channel_id,user_id,message) VALUES(${channelId},${req.user.id},${message}) RETURNING *`;const recipients=await sql`SELECT user_id FROM chat_channel_members WHERE channel_id=${channelId} AND user_id<>${req.user.id}`;for(const person of recipients)await addWorkspaceNotification(person.user_id,req.user.id,'chat',channel.channel_type==='team'?`New message in ${channel.name}`:`Message from ${req.user.name}`,message,channelId,null);for(const person of recipients)io?.to(`user:${person.user_id}`).emit('chat-message',{channel_id:channelId,message_id:item.id});res.status(201).json({...item,user_name:req.user.name,avatar_color:req.user.avatar_color,attachments:[]}); } catch(error){sendError(res,error);}
+  const channelId=Number(req.params.id),message=String(req.body.message||'').trim(),replyTo=Number(req.body.reply_to_id)||null;if(!message)return res.status(400).json({error:'Write a message first'});
+  try { const[member]=await sql`SELECT 1 FROM chat_channel_members WHERE channel_id=${channelId} AND user_id=${req.user.id}`;if(!member)return res.status(403).json({error:'Chat access denied'});if(replyTo){const[reply]=await sql`SELECT 1 FROM chat_messages WHERE id=${replyTo} AND channel_id=${channelId}`;if(!reply)return res.status(400).json({error:'The replied message is unavailable'});}const[channel]=await sql`SELECT * FROM chat_channels WHERE id=${channelId}`;const[item]=await sql`INSERT INTO chat_messages(channel_id,user_id,message,reply_to_id) VALUES(${channelId},${req.user.id},${message},${replyTo}) RETURNING *`;const recipients=await sql`SELECT user_id FROM chat_channel_members WHERE channel_id=${channelId} AND user_id<>${req.user.id}`;for(const person of recipients)await addWorkspaceNotification(person.user_id,req.user.id,'chat',channel.channel_type==='team'?`New message in ${channel.name}`:`Message from ${req.user.name}`,message,channelId,null);for(const person of recipients)io?.to(`user:${person.user_id}`).emit('chat-message',{channel_id:channelId,message_id:item.id});res.status(201).json({...item,user_name:req.user.name,avatar_color:req.user.avatar_color,attachments:[]}); } catch(error){sendError(res,error);}
 });
 
 app.post('/api/chat/channels/:id/attachments',upload.array('files',5),async(req,res)=>{
-  const channelId=Number(req.params.id),caption=String(req.body.caption||'').trim();try{const[member]=await sql`SELECT 1 FROM chat_channel_members WHERE channel_id=${channelId} AND user_id=${req.user.id}`;if(!member)return res.status(403).json({error:'Chat access denied'});if(!req.files?.length)return res.status(400).json({error:'Choose at least one image or document'});const[channel]=await sql`SELECT * FROM chat_channels WHERE id=${channelId}`;const[item]=await sql`INSERT INTO chat_messages(channel_id,user_id,message) VALUES(${channelId},${req.user.id},${caption}) RETURNING *`;const attachments=[];for(const file of req.files){const[a]=await sql`INSERT INTO chat_attachments(message_id,filename,mime_type,file_size,content) VALUES(${item.id},${file.originalname},${file.mimetype},${file.size},${file.buffer}) RETURNING id,message_id,filename,mime_type,file_size`;attachments.push(a);}const recipients=await sql`SELECT user_id FROM chat_channel_members WHERE channel_id=${channelId} AND user_id<>${req.user.id}`;const preview=caption||`Sent ${attachments.length} file${attachments.length===1?'':'s'}`;for(const person of recipients){await addWorkspaceNotification(person.user_id,req.user.id,'chat',channel.channel_type==='team'?`New file in ${channel.name}`:`File from ${req.user.name}`,preview,channelId,null);io?.to(`user:${person.user_id}`).emit('chat-message',{channel_id:channelId,message_id:item.id});}res.status(201).json({...item,user_name:req.user.name,avatar_color:req.user.avatar_color,attachments});}catch(error){sendError(res,error);}
+  const channelId=Number(req.params.id),caption=String(req.body.caption||'').trim(),replyTo=Number(req.body.reply_to_id)||null;try{const[member]=await sql`SELECT 1 FROM chat_channel_members WHERE channel_id=${channelId} AND user_id=${req.user.id}`;if(!member)return res.status(403).json({error:'Chat access denied'});if(!req.files?.length)return res.status(400).json({error:'Choose at least one image or document'});const[channel]=await sql`SELECT * FROM chat_channels WHERE id=${channelId}`;const[item]=await sql`INSERT INTO chat_messages(channel_id,user_id,message,reply_to_id) VALUES(${channelId},${req.user.id},${caption},${replyTo}) RETURNING *`;const attachments=[];for(const file of req.files){const[a]=await sql`INSERT INTO chat_attachments(message_id,filename,mime_type,file_size,content) VALUES(${item.id},${file.originalname},${file.mimetype},${file.size},${file.buffer}) RETURNING id,message_id,filename,mime_type,file_size`;attachments.push(a);}const recipients=await sql`SELECT user_id FROM chat_channel_members WHERE channel_id=${channelId} AND user_id<>${req.user.id}`;const preview=caption||`Sent ${attachments.length} file${attachments.length===1?'':'s'}`;for(const person of recipients){await addWorkspaceNotification(person.user_id,req.user.id,'chat',channel.channel_type==='team'?`New file in ${channel.name}`:`File from ${req.user.name}`,preview,channelId,null);io?.to(`user:${person.user_id}`).emit('chat-message',{channel_id:channelId,message_id:item.id});}res.status(201).json({...item,user_name:req.user.name,avatar_color:req.user.avatar_color,attachments});}catch(error){sendError(res,error);}
 });
 
 app.get('/api/chat/attachments/:id',async(req,res)=>{try{const[file]=await sql`SELECT a.filename,a.mime_type,a.content,m.channel_id FROM chat_attachments a JOIN chat_messages m ON m.id=a.message_id WHERE a.id=${Number(req.params.id)}`;if(!file)return res.status(404).json({error:'File not found'});const[member]=await sql`SELECT 1 FROM chat_channel_members WHERE channel_id=${file.channel_id} AND user_id=${req.user.id}`;if(!member)return res.status(403).json({error:'File access denied'});res.setHeader('Content-Type',file.mime_type);res.setHeader('Content-Disposition',`inline; filename*=UTF-8''${encodeURIComponent(file.filename)}`);res.end(file.content);}catch(error){sendError(res,error);}});
+
+app.post('/api/chat/messages/:id/reactions',async(req,res)=>{
+  const messageId=Number(req.params.id),emoji=String(req.body.emoji||'').trim().slice(0,20);if(!emoji)return res.status(400).json({error:'Choose a reaction'});
+  try{const[message]=await sql`SELECT m.id,m.channel_id FROM chat_messages m JOIN chat_channel_members cm ON cm.channel_id=m.channel_id WHERE m.id=${messageId} AND cm.user_id=${req.user.id}`;if(!message)return res.status(404).json({error:'Message not found'});const[existing]=await sql`SELECT 1 FROM chat_message_reactions WHERE message_id=${messageId} AND user_id=${req.user.id} AND emoji=${emoji}`;if(existing)await sql`DELETE FROM chat_message_reactions WHERE message_id=${messageId} AND user_id=${req.user.id} AND emoji=${emoji}`;else await sql`INSERT INTO chat_message_reactions(message_id,user_id,emoji) VALUES(${messageId},${req.user.id},${emoji})`;io?.to(`chat:${message.channel_id}`).emit('chat-message',{channel_id:message.channel_id,message_id:messageId});res.json({reacted:!existing});}catch(error){sendError(res,error)}
+});
+
+app.post('/api/chat/messages/:id/forward',async(req,res)=>{
+  const sourceId=Number(req.params.id),channelIds=[...new Set((req.body.channel_ids||[]).map(Number).filter(Boolean))].slice(0,20);if(!channelIds.length)return res.status(400).json({error:'Choose at least one conversation'});
+  try{const[source]=await sql`SELECT m.* FROM chat_messages m JOIN chat_channel_members cm ON cm.channel_id=m.channel_id WHERE m.id=${sourceId} AND cm.user_id=${req.user.id}`;if(!source)return res.status(404).json({error:'Message not found'});const created=[];for(const channelId of channelIds){const[member]=await sql`SELECT 1 FROM chat_channel_members WHERE channel_id=${channelId} AND user_id=${req.user.id}`;if(!member)continue;const[item]=await sql`INSERT INTO chat_messages(channel_id,user_id,message,forwarded_from_id) VALUES(${channelId},${req.user.id},${source.message},${sourceId}) RETURNING *`;await sql`INSERT INTO chat_attachments(message_id,filename,mime_type,file_size,content) SELECT ${item.id},filename,mime_type,file_size,content FROM chat_attachments WHERE message_id=${sourceId}`;const recipients=await sql`SELECT user_id FROM chat_channel_members WHERE channel_id=${channelId} AND user_id<>${req.user.id}`;for(const person of recipients)io?.to(`user:${person.user_id}`).emit('chat-message',{channel_id:channelId,message_id:item.id});created.push(item);}res.status(201).json({forwarded:created.length});}catch(error){sendError(res,error)}
+});
 
 app.post('/api/meetings', async (req, res) => {
   const {title,description='',team_id=null,start_at,end_at,attendee_ids=[],meeting_mode='video',is_instant=false}=req.body;const start=new Date(start_at),end=new Date(end_at),mode=meeting_mode==='voice'?'voice':'video';if(!String(title||'').trim())return res.status(400).json({error:'Meeting title is required'});if(!start_at||!end_at||Number.isNaN(start.valueOf())||Number.isNaN(end.valueOf())||end<=start)return res.status(400).json({error:'Choose a valid start and end time'});
