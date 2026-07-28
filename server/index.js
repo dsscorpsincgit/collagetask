@@ -436,6 +436,26 @@ app.post('/api/teams', requireWorkspaceManager, async (req, res) => {
   } catch (error) { sendError(res, error); }
 });
 
+app.patch('/api/teams/:id/members',requireWorkspaceManager,async(req,res)=>{
+  const teamId=Number(req.params.id),requested=[...new Set((req.body.user_ids||[]).map(Number).filter(Boolean))].slice(0,100);
+  if(!requested.length)return res.status(400).json({error:'Select at least one employee'});
+  try{
+    if(!sql){const team=demo.teams.find(item=>item.id===teamId);if(!team)return res.status(404).json({error:'Team not found'});team.member_ids=[...new Set([...(team.member_ids||[]),...requested])];return res.json({member_ids:team.member_ids,added:requested.length})}
+    const[team]=await sql`SELECT id,name FROM teams WHERE id=${teamId}`;if(!team)return res.status(404).json({error:'Team not found'});
+    let[channel]=await sql`SELECT id FROM chat_channels WHERE team_id=${teamId} AND channel_type='team' LIMIT 1`;
+    if(!channel)[channel]=await sql`INSERT INTO chat_channels(name,channel_type,team_id,created_by) VALUES(${team.name},'team',${teamId},${req.user.id}) RETURNING id`;
+    const added=[];
+    for(const userId of requested){
+      const[user]=await sql`SELECT id FROM users WHERE id=${userId} AND status='active' AND must_change_password=FALSE`;if(!user)continue;
+      const[link]=await sql`INSERT INTO team_members(team_id,user_id) VALUES(${teamId},${userId}) ON CONFLICT DO NOTHING RETURNING user_id`;
+      await sql`INSERT INTO chat_channel_members(channel_id,user_id) VALUES(${channel.id},${userId}) ON CONFLICT DO NOTHING`;
+      if(link){added.push(userId);await addWorkspaceNotification(userId,req.user.id,'team','Added to a team',`You were added to ${team.name}.`,channel.id,null)}
+    }
+    const members=await sql`SELECT user_id FROM team_members WHERE team_id=${teamId} ORDER BY user_id`;
+    res.json({member_ids:members.map(item=>item.user_id),added:added.length});
+  }catch(error){sendError(res,error)}
+});
+
 app.get('/api/chat/channels', async (req, res) => {
   try {
     await sql`INSERT INTO chat_message_receipts(message_id,user_id,delivered_at)
