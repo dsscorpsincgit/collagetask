@@ -104,18 +104,12 @@ async function syncAppRelease(){
   if(!release)return;
   const [{release_count:releaseCount}]=await sql`SELECT COUNT(*)::int AS release_count FROM app_releases`;
   if(releaseCount<=1)return;
-  const [users,notifications]=await Promise.all([
-    sql`SELECT id,name,email FROM users WHERE status='active'`,
-    sql`INSERT INTO notifications(user_id,type,title,message) SELECT id,'app_update',${appReleaseTitle},${appReleaseNotes} FROM users WHERE status='active' RETURNING *`
-  ]);
+  const notifications=await sql`INSERT INTO notifications(user_id,type,title,message) SELECT id,'app_update',${appReleaseTitle},${appReleaseNotes} FROM users WHERE status='active' RETURNING *`;
   notifications.forEach(item=>io?.to(`user:${item.user_id}`).emit('notification',item));
-  const deliveries=[
-    ...notifications.map(item=>sendPush(item.user_id,{notificationId:item.id,title:appReleaseTitle,body:appReleaseNotes,type:'app_update',url:'/',tag:`app_update-${item.id}`})),
-    ...(mailer?users.map(user=>mailer.sendMail({from:process.env.MAIL_FROM||process.env.SMTP_USER,to:user.email,subject:appReleaseTitle,text:`Hello ${user.name},\n\n${appReleaseTitle}\n${appReleaseNotes}\n\nOpen DSS Flow: ${appUrl}\n\nTo install: open DSS Flow in Chrome and select Install DSS Flow from the address bar or Chrome menu.`,...brandedEmail({eyebrow:`VERSION ${appVersion}`,title:appReleaseTitle,greeting:`Hello ${user.name},`,content:`<div style="padding:18px;background:#eef9fa;border-left:4px solid #22bdcc;border-radius:8px"><p style="margin:0;color:#526176;font-size:14px;line-height:1.65">${escapeHtml(appReleaseNotes)}</p></div>`,buttonLabel:'Update DSS Flow'})})):[])
-  ];
+  const deliveries=notifications.map(item=>sendPush(item.user_id,{notificationId:item.id,title:appReleaseTitle,body:appReleaseNotes,type:'app_update',url:'/',tag:`app_update-${item.id}`}));
   const results=await Promise.allSettled(deliveries);
   const failed=results.filter(result=>result.status==='rejected');
-  if(failed.length)console.error(`Release ${appVersion}: ${failed.length} push/email deliveries failed.`);
+  if(failed.length)console.error(`Release ${appVersion}: ${failed.length} push deliveries failed.`);
 }
 
 const demo = {
@@ -418,6 +412,18 @@ app.post('/api/push/subscribe',async(req,res)=>{
   try{await sql`INSERT INTO push_subscriptions(user_id,endpoint,subscription,user_agent) VALUES(${req.user.id},${endpoint},${JSON.stringify(subscription)}::jsonb,${String(req.headers['user-agent']||'').slice(0,500)}) ON CONFLICT(endpoint) DO UPDATE SET user_id=${req.user.id},subscription=${JSON.stringify(subscription)}::jsonb,user_agent=${String(req.headers['user-agent']||'').slice(0,500)},updated_at=NOW()`;res.status(201).json({subscribed:true})}catch(error){sendError(res,error)}
 });
 
+app.post('/api/push/test',async(req,res)=>{
+  if(!pushEnabled)return res.status(503).json({error:'Push notifications are not configured on the server'});
+  if(!sql)return res.status(503).json({error:'A database connection is required to test push notifications'});
+  try{
+    const title='DSS Flow test notification',message='Mobile and desktop push notifications are working correctly on this device.';
+    const[item]=await sql`INSERT INTO notifications(user_id,actor_id,type,title,message) VALUES(${req.user.id},${req.user.id},'message',${title},${message}) RETURNING *`;
+    io?.to(`user:${req.user.id}`).emit('notification',item);
+    await sendPush(req.user.id,{notificationId:item.id,title,body:message,type:'message',url:'/',tag:`push-test-${item.id}`,timestamp:Date.now(),forceDisplay:true});
+    res.json({sent:true});
+  }catch(error){sendError(res,error)}
+});
+
 app.delete('/api/push/subscribe',async(req,res)=>{
   const endpoint=String(req.body?.endpoint||'');try{if(endpoint)await sql`DELETE FROM push_subscriptions WHERE endpoint=${endpoint} AND user_id=${req.user.id}`;res.status(204).end()}catch(error){sendError(res,error)}
 });
@@ -446,7 +452,7 @@ app.patch('/api/teams/:id/members',requireWorkspaceManager,async(req,res)=>{
     if(!channel)[channel]=await sql`INSERT INTO chat_channels(name,channel_type,team_id,created_by) VALUES(${team.name},'team',${teamId},${req.user.id}) RETURNING id`;
     const added=[];
     for(const userId of requested){
-      const[user]=await sql`SELECT id FROM users WHERE id=${userId} AND status='active' AND must_change_password=FALSE`;if(!user)continue;
+      const[user]=await sql`SELECT id FROM users WHERE id=${userId} AND status='active'`;if(!user)continue;
       const[link]=await sql`INSERT INTO team_members(team_id,user_id) VALUES(${teamId},${userId}) ON CONFLICT DO NOTHING RETURNING user_id`;
       await sql`INSERT INTO chat_channel_members(channel_id,user_id) VALUES(${channel.id},${userId}) ON CONFLICT DO NOTHING`;
       if(link){added.push(userId);await addWorkspaceNotification(userId,req.user.id,'team','Added to a team',`You were added to ${team.name}.`,channel.id,null)}

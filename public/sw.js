@@ -1,4 +1,4 @@
-const CACHE = 'dss-flow-v7-fast-push';
+const CACHE = 'dss-flow-v8-notification-cards';
 const SHELL = ['/', '/manifest.webmanifest', '/dsslogo.31878f461bb1d61573f8.jpg', '/pwa-192.png', '/pwa-512.png'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting())));
 self.addEventListener('activate', event => event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim())));
@@ -15,8 +15,8 @@ self.addEventListener('push',event=>{
   event.waitUntil(self.clients.matchAll({type:'window',includeUncontrolled:true}).then(async clients=>{
     const visible=clients.some(client=>client.visibilityState==='visible');
     clients.forEach(client=>client.postMessage({type:'DSS_PUSH',payload}));
-    if(visible)return;
-    await self.registration.showNotification(payload.title,{body:payload.body,icon:'/pwa-192.png',badge:'/pwa-192.png',tag:payload.tag||`dss-${payload.type}`,renotify:true,vibrate:[180,80,180],data:{url:payload.url||'/'},actions:[{action:'open',title:'Open DSS Flow'}]});
+    if(visible&&!payload.forceDisplay)return;
+    await self.registration.showNotification(payload.title,{body:payload.body,icon:'/pwa-512.png',tag:payload.tag||`dss-${payload.type}`,renotify:true,timestamp:Number(payload.timestamp)||Date.now(),vibrate:[180,80,180],silent:false,data:{url:payload.url||'/',type:payload.type,notificationId:payload.notificationId},actions:[{action:'open',title:'Open DSS Flow'}]});
   }));
 });
 
