@@ -20,11 +20,31 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3001;
 const appUrl = process.env.APP_URL || `http://localhost:${port}`;
-const appVersion = process.env.APP_VERSION || '1.0.0';
+const vercelDeploymentVersion = String(process.env.VERCEL_DEPLOYMENT_ID || '').trim();
+const vercelCommitVersion = String(process.env.VERCEL_GIT_COMMIT_SHA || '').trim();
+const appVersion = (
+  vercelDeploymentVersion
+    ? `deploy-${vercelDeploymentVersion.replace(/^dpl_/, '')}`
+    : vercelCommitVersion
+      ? `git-${vercelCommitVersion}`
+      : process.env.APP_VERSION || '1.0.0'
+).slice(0, 40);
+const appReleaseTitle = process.env.APP_RELEASE_TITLE || 'A new DSS Flow version is available';
+const appReleaseNotes = String(process.env.VERCEL_GIT_COMMIT_MESSAGE || process.env.APP_RELEASE_NOTES || 'Performance improvements and fixes are ready.').trim();
+const isProductionRelease = !process.env.VERCEL || ['production', 'prod'].includes(String(process.env.VERCEL_TARGET_ENV || process.env.VERCEL_ENV || '').toLowerCase());
 const sql = process.env.DATABASE_URL ? neon(process.env.DATABASE_URL) : null;
 let io;
-const pushEnabled=Boolean(process.env.VAPID_PUBLIC_KEY&&process.env.VAPID_PRIVATE_KEY);
-if(pushEnabled)webpush.setVapidDetails(process.env.VAPID_SUBJECT||`mailto:${process.env.ADMIN_EMAIL||'admin@example.com'}`,process.env.VAPID_PUBLIC_KEY,process.env.VAPID_PRIVATE_KEY);
+let pushEnabled=false;
+if(process.env.VAPID_PUBLIC_KEY&&process.env.VAPID_PRIVATE_KEY){
+  const configuredSubject=String(process.env.VAPID_SUBJECT||process.env.ADMIN_EMAIL||'admin@example.com').trim();
+  const vapidSubject=/^(mailto:|https?:\/\/)/i.test(configuredSubject)?configuredSubject:`mailto:${configuredSubject}`;
+  try{
+    webpush.setVapidDetails(vapidSubject,process.env.VAPID_PUBLIC_KEY,process.env.VAPID_PRIVATE_KEY);
+    pushEnabled=true;
+  }catch(error){
+    console.error(`Push notifications disabled: ${error.message}`);
+  }
+}
 
 app.use(cors());
 app.use(express.json());
@@ -79,15 +99,23 @@ async function sendMeetingChatInvitation(organizer, attendeeId, meeting) {
 }
 
 async function syncAppRelease(){
-  if(!sql)return;const existing=await sql`SELECT version FROM app_releases ORDER BY created_at DESC`;if(existing.some(item=>item.version===appVersion))return;
-  const title=process.env.APP_RELEASE_TITLE||`DSS Flow ${appVersion} is available`,notes=process.env.APP_RELEASE_NOTES||'A new version of DSS Flow is ready with improvements and fixes.';
-  await sql`INSERT INTO app_releases(version,title,notes) VALUES(${appVersion},${title},${notes})`;
-  if(!existing.length)return;
-  const users=await sql`SELECT id,name,email FROM users WHERE status='active'`;
-  for(const user of users){
-    await addWorkspaceNotification(user.id,null,'app_update',title,notes);
-    if(mailer)await mailer.sendMail({from:process.env.MAIL_FROM||process.env.SMTP_USER,to:user.email,subject:title,text:`Hello ${user.name},\n\n${title}\n${notes}\n\nOpen DSS Flow: ${appUrl}\n\nTo install: open DSS Flow in Chrome and select Install DSS Flow from the address bar or Chrome menu.`,...brandedEmail({eyebrow:`VERSION ${appVersion}`,title,greeting:`Hello ${user.name},`,content:`<div style="padding:18px;background:#eef9fa;border-left:4px solid #22bdcc;border-radius:8px"><p style="margin:0;color:#526176;font-size:14px;line-height:1.65">${escapeHtml(notes)}</p></div>`,buttonLabel:'Update DSS Flow'})});
-  }
+  if(!sql||!isProductionRelease)return;
+  const [release]=await sql`INSERT INTO app_releases(version,title,notes) VALUES(${appVersion},${appReleaseTitle},${appReleaseNotes}) ON CONFLICT(version) DO NOTHING RETURNING version`;
+  if(!release)return;
+  const [{release_count:releaseCount}]=await sql`SELECT COUNT(*)::int AS release_count FROM app_releases`;
+  if(releaseCount<=1)return;
+  const [users,notifications]=await Promise.all([
+    sql`SELECT id,name,email FROM users WHERE status='active'`,
+    sql`INSERT INTO notifications(user_id,type,title,message) SELECT id,'app_update',${appReleaseTitle},${appReleaseNotes} FROM users WHERE status='active' RETURNING *`
+  ]);
+  notifications.forEach(item=>io?.to(`user:${item.user_id}`).emit('notification',item));
+  const deliveries=[
+    ...notifications.map(item=>sendPush(item.user_id,{title:appReleaseTitle,body:appReleaseNotes,type:'app_update',url:'/',tag:`app_update-${item.id}`})),
+    ...(mailer?users.map(user=>mailer.sendMail({from:process.env.MAIL_FROM||process.env.SMTP_USER,to:user.email,subject:appReleaseTitle,text:`Hello ${user.name},\n\n${appReleaseTitle}\n${appReleaseNotes}\n\nOpen DSS Flow: ${appUrl}\n\nTo install: open DSS Flow in Chrome and select Install DSS Flow from the address bar or Chrome menu.`,...brandedEmail({eyebrow:`VERSION ${appVersion}`,title:appReleaseTitle,greeting:`Hello ${user.name},`,content:`<div style="padding:18px;background:#eef9fa;border-left:4px solid #22bdcc;border-radius:8px"><p style="margin:0;color:#526176;font-size:14px;line-height:1.65">${escapeHtml(appReleaseNotes)}</p></div>`,buttonLabel:'Update DSS Flow'})})):[])
+  ];
+  const results=await Promise.allSettled(deliveries);
+  const failed=results.filter(result=>result.status==='rejected');
+  if(failed.length)console.error(`Release ${appVersion}: ${failed.length} push/email deliveries failed.`);
 }
 
 const demo = {
@@ -142,7 +170,7 @@ async function initDatabase() {
   await sql`INSERT INTO chat_channels (name, channel_type, team_id) SELECT t.name, 'team', t.id FROM teams t WHERE NOT EXISTS (SELECT 1 FROM chat_channels c WHERE c.team_id=t.id)`;
   await sql`INSERT INTO chat_channel_members (channel_id, user_id) SELECT c.id, tm.user_id FROM chat_channels c JOIN team_members tm ON tm.team_id=c.team_id WHERE c.channel_type='team' ON CONFLICT DO NOTHING`;
   await sql`UPDATE invitations i SET status='accepted',accepted_at=COALESCE(i.accepted_at,NOW()) FROM users u WHERE (i.user_id=u.id OR LOWER(i.email)=LOWER(u.email)) AND i.status='pending' AND u.must_change_password=FALSE`;
-  syncAppRelease().catch(error=>console.error('Release announcement failed:',error));
+  await syncAppRelease();
 }
 
 let databaseReadyPromise;
@@ -243,7 +271,7 @@ app.get('/api/dashboard', async (req, res) => {
   } catch (error) { sendError(res, error); }
 });
 
-app.get('/api/app-version',async(_req,res)=>{try{if(!sql)return res.json({version:appVersion,title:'DSS Flow update',notes:'A new version is available.'});const[release]=await sql`SELECT * FROM app_releases WHERE version=${appVersion}`;res.json({version:appVersion,title:release?.title||`DSS Flow ${appVersion}`,notes:release?.notes||''})}catch(error){sendError(res,error)}});
+app.get('/api/app-version',async(_req,res)=>{try{if(!sql)return res.json({version:appVersion,title:appReleaseTitle,notes:appReleaseNotes});const[release]=await sql`SELECT * FROM app_releases WHERE version=${appVersion}`;res.json({version:appVersion,title:release?.title||appReleaseTitle,notes:release?.notes||appReleaseNotes})}catch(error){sendError(res,error)}});
 
 app.post('/api/projects', requireWorkspaceManager, async (req, res) => {
   const { name, description = '', color = '#24c8d8', due_date = null } = req.body;
