@@ -6,10 +6,7 @@
   "functions": {
     "api/[...path].js": {
       "maxDuration": 300,
-      "includeFiles": [
-        "server/schema.sql",
-        "public/dsslogo.31878f461bb1d61573f8.jpg"
-      ]
+      "includeFiles": "**/*.{sql,jpg}"
     }
   },
   "rewrites": [
