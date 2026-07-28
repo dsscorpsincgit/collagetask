@@ -78,14 +78,14 @@ async function addNotification(userId, actorId, taskId, type, title, message) {
   if (!sql || !userId || userId === actorId) return;
   const[item]=await sql`INSERT INTO notifications (user_id, actor_id, task_id, type, title, message) VALUES (${userId}, ${actorId}, ${taskId}, ${type}, ${title}, ${message}) RETURNING *`;
   io?.to(`user:${userId}`).emit('notification',item);
-  await sendPush(userId,{title,body:message,type,url:taskId?`/?task=${taskId}`:'/',tag:`${type}-${item.id}`});
+  await sendPush(userId,{notificationId:item.id,title,body:message,type,url:taskId?`/?task=${taskId}`:'/',tag:`${type}-${item.id}`});
 }
 
 async function addWorkspaceNotification(userId, actorId, type, title, message, chatChannelId = null, meetingId = null) {
   if (!sql || !userId || userId === actorId) return;
   const[item]=await sql`INSERT INTO notifications (user_id, actor_id, type, title, message, chat_channel_id, meeting_id) VALUES (${userId}, ${actorId}, ${type}, ${title}, ${message}, ${chatChannelId}, ${meetingId}) RETURNING *`;
   io?.to(`user:${userId}`).emit('notification',item);
-  await sendPush(userId,{title,body:message,type,url:chatChannelId?`/?view=chat&channel=${chatChannelId}`:meetingId?`/?view=calendar&meeting=${meetingId}`:'/',tag:`${type}-${item.id}`});
+  await sendPush(userId,{notificationId:item.id,title,body:message,type,url:chatChannelId?`/?view=chat&channel=${chatChannelId}`:meetingId?`/?view=calendar&meeting=${meetingId}`:'/',tag:`${type}-${item.id}`});
 }
 
 async function sendMeetingChatInvitation(organizer, attendeeId, meeting) {
@@ -110,7 +110,7 @@ async function syncAppRelease(){
   ]);
   notifications.forEach(item=>io?.to(`user:${item.user_id}`).emit('notification',item));
   const deliveries=[
-    ...notifications.map(item=>sendPush(item.user_id,{title:appReleaseTitle,body:appReleaseNotes,type:'app_update',url:'/',tag:`app_update-${item.id}`})),
+    ...notifications.map(item=>sendPush(item.user_id,{notificationId:item.id,title:appReleaseTitle,body:appReleaseNotes,type:'app_update',url:'/',tag:`app_update-${item.id}`})),
     ...(mailer?users.map(user=>mailer.sendMail({from:process.env.MAIL_FROM||process.env.SMTP_USER,to:user.email,subject:appReleaseTitle,text:`Hello ${user.name},\n\n${appReleaseTitle}\n${appReleaseNotes}\n\nOpen DSS Flow: ${appUrl}\n\nTo install: open DSS Flow in Chrome and select Install DSS Flow from the address bar or Chrome menu.`,...brandedEmail({eyebrow:`VERSION ${appVersion}`,title:appReleaseTitle,greeting:`Hello ${user.name},`,content:`<div style="padding:18px;background:#eef9fa;border-left:4px solid #22bdcc;border-radius:8px"><p style="margin:0;color:#526176;font-size:14px;line-height:1.65">${escapeHtml(appReleaseNotes)}</p></div>`,buttonLabel:'Update DSS Flow'})})):[])
   ];
   const results=await Promise.allSettled(deliveries);
@@ -358,7 +358,7 @@ app.post('/api/tasks/:id/messages', async (req, res) => {
     if (!task) return res.status(404).json({ error: 'Task not found' });
     const [item] = await sql`INSERT INTO task_messages (task_id, user_id, message, message_type) VALUES (${taskId}, ${req.user.id}, ${message}, ${messageType}) RETURNING *`;
     const recipients = new Set([task.assignee_id, task.created_by]);
-    for (const userId of recipients) await addNotification(userId, req.user.id, taskId, messageType === 'question' ? 'question' : 'message', messageType === 'question' ? 'Question about a task' : 'New task message', `${task.title}: ${message}`);
+    await Promise.all([...recipients].map(userId=>addNotification(userId, req.user.id, taskId, messageType === 'question' ? 'question' : 'message', messageType === 'question' ? 'Question about a task' : 'New task message', `${task.title}: ${message}`)));
     res.status(201).json({ ...item, user_name: req.user.name, avatar_color: req.user.avatar_color });
   } catch (error) { sendError(res, error); }
 });
@@ -388,6 +388,17 @@ app.get('/api/attachments/:id', async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(file.filename)}`);
     res.end(file.content);
   } catch (error) { sendError(res, error); }
+});
+
+app.get('/api/notifications',async(req,res)=>{
+  const after=Math.max(0,Number(req.query.after)||0);
+  try{
+    if(!sql)return res.json([]);
+    const items=after
+      ? await sql`SELECT n.*,a.name AS actor_name FROM notifications n LEFT JOIN users a ON a.id=n.actor_id WHERE n.user_id=${req.user.id} AND n.id>${after} ORDER BY n.id ASC LIMIT 40`
+      : await sql`SELECT n.*,a.name AS actor_name FROM notifications n LEFT JOIN users a ON a.id=n.actor_id WHERE n.user_id=${req.user.id} ORDER BY n.id DESC LIMIT 40`;
+    res.json(items);
+  }catch(error){sendError(res,error)}
 });
 
 app.patch('/api/notifications/:id/read', async (req, res) => {
