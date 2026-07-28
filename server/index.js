@@ -190,6 +190,7 @@ async function requireAuth(req, res, next) {
     const [user] = await sql`SELECT u.id, u.name, u.email, u.role, u.avatar_color, u.status, u.work_status, u.status_note, u.must_change_password FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ${hashToken(token)} AND s.expires_at > NOW()`;
     if (!user) return res.status(401).json({ error: 'Session expired' });
     if (user.status !== 'active') return res.status(403).json({ error: 'Workspace access suspended' });
+    await sql`UPDATE invitations SET status='accepted',accepted_at=COALESCE(accepted_at,NOW()) WHERE status='pending' AND (user_id=${user.id} OR LOWER(email)=LOWER(${user.email}))`;
     req.user = user;
     next();
   } catch (error) { sendError(res, error); }
@@ -220,7 +221,7 @@ app.get('/api/dashboard', async (req, res) => {
     const [users, teamsRaw, projects, tasks, invitations, links, notifications, meetingsRaw, meetingLinks] = await Promise.all([
       sql`SELECT u.id,u.name,u.email,u.role,u.avatar_color,u.status,u.work_status,u.status_note,u.status_updated_at,u.created_at,COALESCE((SELECT i.status FROM invitations i WHERE i.user_id=u.id OR LOWER(i.email)=LOWER(u.email) ORDER BY i.created_at DESC LIMIT 1),'accepted') AS invitation_status FROM users u ORDER BY u.name`, sql`SELECT * FROM teams ORDER BY created_at`,
       sql`SELECT * FROM projects ORDER BY created_at`, sql`SELECT * FROM tasks ORDER BY created_at`,
-      sql`SELECT * FROM invitations WHERE status='pending' ORDER BY created_at DESC`, sql`SELECT * FROM team_members`,
+      sql`SELECT i.* FROM invitations i JOIN users u ON u.id=i.user_id WHERE i.status='pending' AND u.status='active' AND u.must_change_password=TRUE ORDER BY i.created_at DESC`, sql`SELECT * FROM team_members`,
       sql`SELECT n.*, a.name AS actor_name FROM notifications n LEFT JOIN users a ON a.id=n.actor_id WHERE n.user_id=${req.user.id} ORDER BY n.created_at DESC LIMIT 40`,
       sql`SELECT m.*, u.name AS organizer_name FROM meetings m LEFT JOIN users u ON u.id=m.organizer_id WHERE m.organizer_id=${req.user.id} OR EXISTS (SELECT 1 FROM meeting_attendees ma WHERE ma.meeting_id=m.id AND ma.user_id=${req.user.id}) ORDER BY m.start_at`,
       sql`SELECT ma.* FROM meeting_attendees ma WHERE ma.meeting_id IN (SELECT m.id FROM meetings m WHERE m.organizer_id=${req.user.id} OR EXISTS (SELECT 1 FROM meeting_attendees x WHERE x.meeting_id=m.id AND x.user_id=${req.user.id}))`,
