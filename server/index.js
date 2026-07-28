@@ -14,6 +14,7 @@ import http from 'node:http';
 import { Server as SocketServer } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { createClient } from 'redis';
+import webpush from 'web-push';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -22,6 +23,8 @@ const appUrl = process.env.APP_URL || `http://localhost:${port}`;
 const appVersion = process.env.APP_VERSION || '1.0.0';
 const sql = process.env.DATABASE_URL ? neon(process.env.DATABASE_URL) : null;
 let io;
+const pushEnabled=Boolean(process.env.VAPID_PUBLIC_KEY&&process.env.VAPID_PRIVATE_KEY);
+if(pushEnabled)webpush.setVapidDetails(process.env.VAPID_SUBJECT||`mailto:${process.env.ADMIN_EMAIL||'admin@example.com'}`,process.env.VAPID_PUBLIC_KEY,process.env.VAPID_PRIVATE_KEY);
 
 app.use(cors());
 app.use(express.json());
@@ -45,16 +48,24 @@ const brandedEmail=({eyebrow='DSS FLOW',title,greeting,content,buttonLabel='Open
   html:`<!doctype html><html><body style="margin:0;background:#f2f5f9;font-family:Arial,sans-serif;color:#17243a"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f2f5f9;padding:28px 12px"><tr><td align="center"><table role="presentation" width="600" cellspacing="0" cellpadding="0" style="max-width:600px;background:#fff;border:1px solid #e1e7ef;border-radius:16px;overflow:hidden"><tr><td style="background:#101c2f;padding:22px 28px"><table role="presentation" width="100%"><tr><td><img src="cid:dss-flow-logo" width="48" height="48" style="display:block;border-radius:10px;object-fit:cover" alt="DSS Flow"></td><td align="right" style="color:#2ac7d6;font-size:12px;font-weight:bold;letter-spacing:1.5px">${escapeHtml(eyebrow)}</td></tr></table></td></tr><tr><td style="padding:30px 32px"><h1 style="font-size:24px;line-height:1.25;margin:0 0 10px;color:#142036">${escapeHtml(title)}</h1><p style="font-size:15px;margin:0 0 22px;color:#647187">${escapeHtml(greeting)}</p>${content}<p style="margin:26px 0"><a href="${escapeHtml(buttonUrl)}" style="display:inline-block;background:#20c2d1;color:#062d34;padding:13px 21px;border-radius:9px;text-decoration:none;font-weight:bold">${escapeHtml(buttonLabel)}</a></p>${showInstall?`<div style="margin-top:26px;padding:18px;background:#f4f8fb;border:1px solid #e2e9f0;border-radius:10px"><strong style="font-size:14px">Install DSS Flow as an app</strong><ol style="padding-left:20px;margin:10px 0 0;color:#68758a;font-size:13px;line-height:1.7"><li>Open DSS Flow in Google Chrome.</li><li>Desktop: click the install icon in the address bar or Chrome menu → Install DSS Flow.</li><li>Android: open the Chrome menu → Install app or Add to Home screen.</li><li>Sign in using your work email.</li></ol></div>`:''}</td></tr><tr><td style="padding:18px 32px;background:#f8fafc;color:#8a96a7;font-size:12px">DSS Flow · DSS Corps Inc. · Secure internal workspace</td></tr></table></td></tr></table></body></html>`
 });
 
+async function sendPush(userId,payload){
+  if(!sql||!pushEnabled||!userId)return;
+  const subscriptions=await sql`SELECT id,subscription FROM push_subscriptions WHERE user_id=${userId}`;
+  await Promise.all(subscriptions.map(async row=>{try{await webpush.sendNotification(row.subscription,JSON.stringify(payload),{TTL:86400,urgency:'high'})}catch(error){if([404,410].includes(error.statusCode))await sql`DELETE FROM push_subscriptions WHERE id=${row.id}`;else console.error('Push delivery failed:',error.message)}}));
+}
+
 async function addNotification(userId, actorId, taskId, type, title, message) {
   if (!sql || !userId || userId === actorId) return;
   const[item]=await sql`INSERT INTO notifications (user_id, actor_id, task_id, type, title, message) VALUES (${userId}, ${actorId}, ${taskId}, ${type}, ${title}, ${message}) RETURNING *`;
   io?.to(`user:${userId}`).emit('notification',item);
+  await sendPush(userId,{title,body:message,type,url:taskId?`/?task=${taskId}`:'/',tag:`${type}-${item.id}`});
 }
 
 async function addWorkspaceNotification(userId, actorId, type, title, message, chatChannelId = null, meetingId = null) {
   if (!sql || !userId || userId === actorId) return;
   const[item]=await sql`INSERT INTO notifications (user_id, actor_id, type, title, message, chat_channel_id, meeting_id) VALUES (${userId}, ${actorId}, ${type}, ${title}, ${message}, ${chatChannelId}, ${meetingId}) RETURNING *`;
   io?.to(`user:${userId}`).emit('notification',item);
+  await sendPush(userId,{title,body:message,type,url:chatChannelId?`/?view=chat&channel=${chatChannelId}`:meetingId?`/?view=calendar&meeting=${meetingId}`:'/',tag:`${type}-${item.id}`});
 }
 
 async function sendMeetingChatInvitation(organizer, attendeeId, meeting) {
@@ -359,6 +370,19 @@ app.post('/api/notifications/read-all', async (req, res) => {
   try { if (sql) await sql`UPDATE notifications SET is_read=TRUE WHERE user_id=${req.user.id}`; res.status(204).end(); } catch (error) { sendError(res, error); }
 });
 
+app.get('/api/push/config',(_req,res)=>res.json({enabled:pushEnabled,public_key:pushEnabled?process.env.VAPID_PUBLIC_KEY:''}));
+
+app.post('/api/push/subscribe',async(req,res)=>{
+  const subscription=req.body?.subscription||req.body,endpoint=String(subscription?.endpoint||'');
+  if(!pushEnabled)return res.status(503).json({error:'Mobile push is not configured on the server'});
+  if(!endpoint||!subscription?.keys?.p256dh||!subscription?.keys?.auth)return res.status(400).json({error:'Invalid push subscription'});
+  try{await sql`INSERT INTO push_subscriptions(user_id,endpoint,subscription,user_agent) VALUES(${req.user.id},${endpoint},${JSON.stringify(subscription)}::jsonb,${String(req.headers['user-agent']||'').slice(0,500)}) ON CONFLICT(endpoint) DO UPDATE SET user_id=${req.user.id},subscription=${JSON.stringify(subscription)}::jsonb,user_agent=${String(req.headers['user-agent']||'').slice(0,500)},updated_at=NOW()`;res.status(201).json({subscribed:true})}catch(error){sendError(res,error)}
+});
+
+app.delete('/api/push/subscribe',async(req,res)=>{
+  const endpoint=String(req.body?.endpoint||'');try{if(endpoint)await sql`DELETE FROM push_subscriptions WHERE endpoint=${endpoint} AND user_id=${req.user.id}`;res.status(204).end()}catch(error){sendError(res,error)}
+});
+
 app.post('/api/teams', requireWorkspaceManager, async (req, res) => {
   const { name, description = '', color = '#24c8d8', member_ids = [] } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: 'Team name is required' });
@@ -382,7 +406,9 @@ app.get('/api/chat/channels', async (req, res) => {
       ON CONFLICT(message_id,user_id) DO UPDATE SET delivered_at=COALESCE(chat_message_receipts.delivered_at,NOW())`;
     const channels = await sql`SELECT c.*,
       (SELECT COALESCE(NULLIF(cm.message,''),'Attachment') FROM chat_messages cm WHERE cm.channel_id=c.id ORDER BY cm.created_at DESC LIMIT 1) AS last_message,
-      (SELECT created_at FROM chat_messages cm WHERE cm.channel_id=c.id ORDER BY cm.created_at DESC LIMIT 1) AS last_message_at
+      (SELECT COALESCE(u.name,'Former employee') FROM chat_messages cm LEFT JOIN users u ON u.id=cm.user_id WHERE cm.channel_id=c.id ORDER BY cm.created_at DESC LIMIT 1) AS last_sender_name,
+      (SELECT created_at FROM chat_messages cm WHERE cm.channel_id=c.id ORDER BY cm.created_at DESC LIMIT 1) AS last_message_at,
+      (SELECT COUNT(*)::int FROM chat_messages cm WHERE cm.channel_id=c.id AND cm.user_id<>${req.user.id} AND NOT EXISTS(SELECT 1 FROM chat_message_receipts receipt WHERE receipt.message_id=cm.id AND receipt.user_id=${req.user.id} AND receipt.read_at IS NOT NULL)) AS unread_count
       FROM chat_channels c
       WHERE EXISTS (SELECT 1 FROM chat_channel_members m WHERE m.channel_id=c.id AND m.user_id=${req.user.id})
       AND (c.channel_type<>'direct' OR (SELECT COUNT(*) FROM chat_channel_members m WHERE m.channel_id=c.id)>1)
@@ -435,7 +461,7 @@ app.get('/api/chat/channels/:id/messages', async (req, res) => {
 
 app.post('/api/chat/channels/:id/messages', async (req, res) => {
   const channelId=Number(req.params.id),message=String(req.body.message||'').trim(),replyTo=Number(req.body.reply_to_id)||null;if(!message)return res.status(400).json({error:'Write a message first'});
-  try { const[member]=await sql`SELECT 1 FROM chat_channel_members WHERE channel_id=${channelId} AND user_id=${req.user.id}`;if(!member)return res.status(403).json({error:'Chat access denied'});if(replyTo){const[reply]=await sql`SELECT 1 FROM chat_messages WHERE id=${replyTo} AND channel_id=${channelId}`;if(!reply)return res.status(400).json({error:'The replied message is unavailable'});}const[channel]=await sql`SELECT * FROM chat_channels WHERE id=${channelId}`;const[item]=await sql`INSERT INTO chat_messages(channel_id,user_id,message,reply_to_id) VALUES(${channelId},${req.user.id},${message},${replyTo}) RETURNING *`;const recipients=await sql`SELECT user_id FROM chat_channel_members WHERE channel_id=${channelId} AND user_id<>${req.user.id}`;for(const person of recipients)await addWorkspaceNotification(person.user_id,req.user.id,'chat',channel.channel_type==='team'?`New message in ${channel.name}`:`Message from ${req.user.name}`,message,channelId,null);for(const person of recipients)io?.to(`user:${person.user_id}`).emit('chat-message',{channel_id:channelId,message_id:item.id});res.status(201).json({...item,user_name:req.user.name,avatar_color:req.user.avatar_color,attachments:[]}); } catch(error){sendError(res,error);}
+  try { const[member]=await sql`SELECT 1 FROM chat_channel_members WHERE channel_id=${channelId} AND user_id=${req.user.id}`;if(!member)return res.status(403).json({error:'Chat access denied'});if(replyTo){const[reply]=await sql`SELECT 1 FROM chat_messages WHERE id=${replyTo} AND channel_id=${channelId}`;if(!reply)return res.status(400).json({error:'The replied message is unavailable'});}const[channel]=await sql`SELECT * FROM chat_channels WHERE id=${channelId}`;const[item]=await sql`INSERT INTO chat_messages(channel_id,user_id,message,reply_to_id) VALUES(${channelId},${req.user.id},${message},${replyTo}) RETURNING *`;const recipients=await sql`SELECT user_id FROM chat_channel_members WHERE channel_id=${channelId} AND user_id<>${req.user.id}`;const notificationTitle=replyTo?`${req.user.name} replied${channel.channel_type==='team'?` in ${channel.name}`:''}`:channel.channel_type==='team'?`${req.user.name} in ${channel.name}`:req.user.name;for(const person of recipients)await addWorkspaceNotification(person.user_id,req.user.id,'chat',notificationTitle,message,channelId,null);for(const person of recipients)io?.to(`user:${person.user_id}`).emit('chat-message',{channel_id:channelId,message_id:item.id});res.status(201).json({...item,user_name:req.user.name,avatar_color:req.user.avatar_color,attachments:[]}); } catch(error){sendError(res,error);}
 });
 
 app.post('/api/chat/channels/:id/attachments',upload.array('files',5),async(req,res)=>{

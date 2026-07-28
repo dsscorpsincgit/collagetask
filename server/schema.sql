@@ -142,6 +142,16 @@ CREATE TABLE IF NOT EXISTS chat_message_reactions (
   PRIMARY KEY (message_id, user_id, emoji)
 );
 
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint TEXT NOT NULL UNIQUE,
+  subscription JSONB NOT NULL,
+  user_agent TEXT DEFAULT '',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS chat_attachments (
   id SERIAL PRIMARY KEY,
   message_id INTEGER NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
@@ -206,5 +216,6 @@ CREATE INDEX IF NOT EXISTS idx_chat_attachments_message ON chat_attachments(mess
 CREATE INDEX IF NOT EXISTS idx_chat_members_user ON chat_channel_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_chat_receipts_user ON chat_message_receipts(user_id, read_at);
 CREATE INDEX IF NOT EXISTS idx_chat_reactions_message ON chat_message_reactions(message_id);
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_attendees_user ON meeting_attendees(user_id);
 CREATE INDEX IF NOT EXISTS idx_meetings_start ON meetings(start_at);

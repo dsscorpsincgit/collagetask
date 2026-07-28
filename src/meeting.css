@@ -115,6 +115,20 @@
 }
 
 @media (max-width: 600px) {
+  .meeting-page-head { width:100%; flex-direction:column; gap:16px; }
+  .meeting-page-head>div:first-child { width:100%; }
+  .meeting-page-head .meeting-page-actions { display:grid;grid-template-columns:1fr 1fr;gap:9px;width:100%; }
+  .meeting-page-actions button { width:100%;min-width:0;height:50px;padding:0 10px;border-radius:11px;font-size:10px;line-height:1.25;white-space:normal;text-align:center; }
+  .meeting-page-actions button svg { width:18px;flex:none; }
+  .meeting-page-actions button:last-child { grid-column:1/-1;height:52px; }
+  .calendar-title { min-height:0;padding:16px;gap:14px; }
+  .calendar-title>div:first-child { width:100%; }
+  .calendar-navigation { display:grid!important;grid-template-columns:40px minmax(92px,1fr) 76px 40px;gap:7px;width:100%;flex-direction:row!important; }
+  .calendar-navigation button,.calendar-navigation select { width:100%;height:40px;font-size:10px; }
+  .calendar-navigation select { min-width:0;padding:0 8px; }
+  .calendar-navigation .today-button { grid-column:1/-1;width:100%;height:38px; }
+  .calendar-grid>div { min-height:74px; }
+  .calendar-week span { padding:8px 2px;font-size:7px; }
   .version-update-banner { top: 8px; align-items: flex-start; flex-direction: column; gap: 9px; }
   .version-update-banner > div:last-child { width: 100%; justify-content: flex-end; }
   .modal-backdrop { padding: 10px; }
