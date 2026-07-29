@@ -62,6 +62,12 @@
 .meeting-header-actions { display: flex; align-items: center; gap: 12px; }
 .meeting-header-actions > b { background: #172439; border-radius: 7px; padding: 8px 10px; font: 700 10px Manrope; }
 .meeting-header-actions .copy-invite { background: #172439; border-color: #35455d; color: #e1e8f2; }
+.meeting-chat-popup { position: fixed; z-index: 170; left: 50%; bottom: 102px; transform: translateX(-50%); width: min(390px,calc(100vw - 24px)); min-height: 62px; display: grid; grid-template-columns: 36px minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid #3a4c65; border-radius: 12px; background: rgba(18,30,48,.96); color: #eef4fb; text-align: left; box-shadow: 0 14px 42px #0008; backdrop-filter: blur(12px); cursor: pointer; animation: meeting-popup-in .2s ease-out; }
+.meeting-chat-popup > span { min-width: 0; }
+.meeting-chat-popup strong { display: block; margin-bottom: 3px; color: #67d7e2; font-size: 9px; }
+.meeting-chat-popup p { margin: 0; overflow: hidden; color: #d7e0eb; font-size: 10px; white-space: nowrap; text-overflow: ellipsis; }
+.meeting-chat-popup small { align-self: start; color: #8493a7; font-size: 7px; }
+@keyframes meeting-popup-in { from { opacity: 0; transform: translate(-50%,12px); } }
 .meeting-stage { flex: 1; min-height: 0; display: flex; padding: 14px; gap: 12px; }
 .meeting-stage .internal-video-grid { flex: 1; padding: 0; }
 .remote-wrap { position: relative; min-height: 0; }
@@ -159,6 +165,13 @@
   .instant-info { line-height: 1.45; }
   .instant-meeting-form > .modal-actions { margin: 12px -16px 0; padding: 12px 16px; }
   .meeting-stage { padding: 6px; }
+  .meeting-stage .internal-video-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); grid-auto-rows: auto; align-content: start; gap: 6px; overflow-y: auto; overscroll-behavior: contain; }
+  .meeting-stage .internal-video-grid.participants-1 { grid-template-columns: 1fr; }
+  .meeting-room-overlay .video-tile, .meeting-stage .remote-wrap { width: 100%; height: auto; min-height: 0; aspect-ratio: 4/3; }
+  .meeting-stage .remote-wrap .video-tile { height: 100%; }
+  .camera-placeholder { gap: 7px; }
+  .camera-placeholder .avatar { width: 52px!important; height: 52px!important; font-size: 14px; }
+  .meeting-chat-popup { bottom: 88px; }
   .meeting-room-overlay > header { padding: 0 10px; }
   .meeting-header-actions > b { display: none; }
   .copy-invite { font-size: 0 !important; width: 38px; justify-content: center; }

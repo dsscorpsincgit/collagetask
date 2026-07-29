@@ -22,16 +22,18 @@ function ParticipantVideo({participant}) {
 }
 
 export default function EnhancedMeetingRoom({meeting,user,users=[],onClose}) {
-  const localVideo=useRef(null),streamRef=useRef(null),peers=useRef(new Map()),pendingIce=useRef(new Map()),clientId=useRef(crypto.randomUUID()),mediaRef=useRef({mic:true,camera:meeting.meeting_mode!=='voice'});
+  const localVideo=useRef(null),streamRef=useRef(null),peers=useRef(new Map()),pendingIce=useRef(new Map()),clientId=useRef(crypto.randomUUID()),mediaRef=useRef({mic:true,camera:meeting.meeting_mode!=='voice'}),panelRef=useRef(null);
   const[remotes,setRemotes]=useState([]),[roomPeople,setRoomPeople]=useState([]),[mediaStates,setMediaStates]=useState({});
   const[mic,setMic]=useState(true),[camera,setCamera]=useState(meeting.meeting_mode!=='voice'),[sharing,setSharing]=useState(false),[ready,setReady]=useState(false);
   const[error,setError]=useState(''),[mediaWarning,setMediaWarning]=useState(''),[panel,setPanel]=useState(null),[seconds,setSeconds]=useState(0);
-  const[chatMessages,setChatMessages]=useState([]),[chatText,setChatText]=useState(''),[raised,setRaised]=useState(false),[raisedHands,setRaisedHands]=useState({});
+  const[chatMessages,setChatMessages]=useState([]),[chatText,setChatText]=useState(''),[chatPopup,setChatPopup]=useState(null),[raised,setRaised]=useState(false),[raisedHands,setRaisedHands]=useState({});
 
   useEffect(()=>{const timer=setInterval(()=>setSeconds(value=>value+1),1000);return()=>clearInterval(timer)},[]);
+  useEffect(()=>{panelRef.current=panel;if(panel==='chat')setChatPopup(null)},[panel]);
+  useEffect(()=>{if(!chatPopup)return;const timer=setTimeout(()=>setChatPopup(null),5000);return()=>clearTimeout(timer)},[chatPopup]);
 
   useEffect(()=>{
-    let active=true,pollTimer,lastSignalId=0,lastMessageId=0,polling=false,detachSocket=()=>{};
+    let active=true,pollTimer,lastSignalId=0,lastMessageId=0,polling=false,chatLoaded=false,detachSocket=()=>{};
     const knownParticipants=new Set();
     const setup=async()=>{
       try {
@@ -78,7 +80,7 @@ export default function EnhancedMeetingRoom({meeting,user,users=[],onClose}) {
               if(clientId.current.localeCompare(person.id)<0)try{const peer=getPeer(person.id),offer=await peer.createOffer();await peer.setLocalDescription(offer);await sendSignal(person.id,'offer',offer)}catch(connectionError){console.warn('Unable to offer meeting connection:',connectionError.message)}
             }
             for(const signal of result.signals||[]){lastSignalId=Math.max(lastSignalId,Number(signal.id));if(signal.signal_type==='offer')await receiveOffer(signal.from_client_id,signal.payload);else if(signal.signal_type==='answer')await receiveAnswer(signal.from_client_id,signal.payload);else if(signal.signal_type==='ice')await receiveIce(signal.from_client_id,signal.payload)}
-            if(result.messages?.length){lastMessageId=Math.max(lastMessageId,...result.messages.map(item=>Number(item.id)));setChatMessages(current=>{const ids=new Set(current.map(item=>String(item.id)));return[...current,...result.messages.filter(item=>!ids.has(String(item.id)))]})}
+            if(result.messages?.length){lastMessageId=Math.max(lastMessageId,...result.messages.map(item=>Number(item.id)));if(chatLoaded&&panelRef.current!=='chat'){const incoming=[...result.messages].reverse().find(item=>Number(item.userId)!==Number(user.id));if(incoming)setChatPopup(incoming)}setChatMessages(current=>{const ids=new Set(current.map(item=>String(item.id)));return[...current,...result.messages.filter(item=>!ids.has(String(item.id)))]})}chatLoaded=true;
           }catch(pollError){if(active)setError(current=>current||pollError.message)}finally{polling=false}
         };
         const receiveHand=item=>setRaisedHands(current=>({...current,[item.socketId]:item.raised?item.userName:undefined}));
@@ -114,6 +116,7 @@ export default function EnhancedMeetingRoom({meeting,user,users=[],onClose}) {
 
   return <div className="meeting-room-overlay">
     <header><div className="meeting-room-brand"><img src="/dsslogo.31878f461bb1d61573f8.jpg"/><span><strong>{meeting.title}</strong><small>Connected · Encrypted DSS Flow meeting</small></span></div><div className="meeting-header-actions"><b>{elapsed}</b><button className="copy-invite" onClick={copyInvite}><Copy/> Copy invite link</button></div></header>
+    {chatPopup&&<button className="meeting-chat-popup" onClick={()=>setPanel('chat')}><ParticipantAvatar person={{name:chatPopup.userName}}/><span><strong>{chatPopup.userName}</strong><p>{chatPopup.message}</p></span><small>{new Date(chatPopup.createdAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</small></button>}
     <div className="meeting-stage">
       <div className={`internal-video-grid participants-${Math.min(roomPeople.length+1,4)}`}>
         <div className="video-tile local"><video ref={localVideo} autoPlay muted playsInline/><div className={`camera-placeholder ${camera?'hidden':''}`}><ParticipantAvatar person={user} size={72}/><strong>{mediaWarning||'Camera is off'}</strong></div><span>{user.name} (You)</span>{raised&&<i className="raised-hand-badge">✋</i>}{!ready&&!error&&<div className="video-loading"><div className="loader"/><span>Joining meeting...</span></div>}</div>
