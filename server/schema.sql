@@ -187,6 +187,35 @@ CREATE TABLE IF NOT EXISTS meeting_attendees (
   PRIMARY KEY (meeting_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS meeting_live_participants (
+  meeting_id INTEGER REFERENCES meetings(id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  client_id VARCHAR(80) NOT NULL,
+  mic_enabled BOOLEAN DEFAULT FALSE,
+  camera_enabled BOOLEAN DEFAULT FALSE,
+  joined_at TIMESTAMPTZ DEFAULT NOW(),
+  last_seen TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (meeting_id, client_id)
+);
+
+CREATE TABLE IF NOT EXISTS meeting_signals (
+  id BIGSERIAL PRIMARY KEY,
+  meeting_id INTEGER REFERENCES meetings(id) ON DELETE CASCADE,
+  from_client_id VARCHAR(80) NOT NULL,
+  target_client_id VARCHAR(80) NOT NULL,
+  signal_type VARCHAR(20) NOT NULL,
+  payload JSONB NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS meeting_chat_messages (
+  id BIGSERIAL PRIMARY KEY,
+  meeting_id INTEGER REFERENCES meetings(id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  message TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS app_releases (
   version VARCHAR(40) PRIMARY KEY,
   title VARCHAR(180) NOT NULL,
@@ -218,4 +247,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_receipts_user ON chat_message_receipts(user_
 CREATE INDEX IF NOT EXISTS idx_chat_reactions_message ON chat_message_reactions(message_id);
 CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_attendees_user ON meeting_attendees(user_id);
+CREATE INDEX IF NOT EXISTS idx_meeting_live_seen ON meeting_live_participants(meeting_id,last_seen);
+CREATE INDEX IF NOT EXISTS idx_meeting_signals_target ON meeting_signals(meeting_id,target_client_id,id);
+CREATE INDEX IF NOT EXISTS idx_meeting_chat_created ON meeting_chat_messages(meeting_id,id);
 CREATE INDEX IF NOT EXISTS idx_meetings_start ON meetings(start_at);

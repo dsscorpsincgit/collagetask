@@ -557,6 +557,53 @@ app.post('/api/meetings/join', async (req,res)=>{
   try{const[meeting]=await sql`SELECT m.*,u.name AS organizer_name FROM meetings m LEFT JOIN users u ON u.id=m.organizer_id WHERE m.room_name=${roomName} AND m.status<>'cancelled'`;if(!meeting)return res.status(404).json({error:'Meeting not found or no longer available'});await sql`INSERT INTO meeting_attendees(meeting_id,user_id,response) VALUES(${meeting.id},${req.user.id},'accepted') ON CONFLICT(meeting_id,user_id) DO UPDATE SET response='accepted'`;const attendees=await sql`SELECT user_id FROM meeting_attendees WHERE meeting_id=${meeting.id}`;res.json({...meeting,attendee_ids:attendees.map(item=>item.user_id)})}catch(error){sendError(res,error)}
 });
 
+app.post('/api/meetings/:roomName/live/poll',async(req,res)=>{
+  const roomName=String(req.params.roomName||'').slice(0,180),clientId=String(req.body.client_id||'').slice(0,80),afterId=Math.max(0,Number(req.body.after_id)||0),afterMessageId=Math.max(0,Number(req.body.after_message_id)||0),mic=Boolean(req.body.mic),camera=Boolean(req.body.camera);
+  if(!clientId||!/^[a-zA-Z0-9-]+$/.test(clientId))return res.status(400).json({error:'Invalid meeting client'});
+  try{
+    const[meeting]=await sql`SELECT m.id FROM meetings m JOIN meeting_attendees ma ON ma.meeting_id=m.id AND ma.user_id=${req.user.id} WHERE m.room_name=${roomName} AND m.status<>'cancelled'`;
+    if(!meeting)return res.status(403).json({error:'You do not have access to this meeting'});
+    await sql`DELETE FROM meeting_live_participants WHERE meeting_id=${meeting.id} AND last_seen<NOW()-INTERVAL '20 seconds'`;
+    await sql`INSERT INTO meeting_live_participants(meeting_id,user_id,client_id,mic_enabled,camera_enabled) VALUES(${meeting.id},${req.user.id},${clientId},${mic},${camera}) ON CONFLICT(meeting_id,client_id) DO UPDATE SET user_id=${req.user.id},mic_enabled=${mic},camera_enabled=${camera},last_seen=NOW()`;
+    const[participants,signals,messages]=await Promise.all([
+      sql`SELECT p.client_id,p.user_id,p.mic_enabled AS mic,p.camera_enabled AS camera,p.joined_at,u.name,u.avatar_color FROM meeting_live_participants p JOIN users u ON u.id=p.user_id WHERE p.meeting_id=${meeting.id} AND p.last_seen>=NOW()-INTERVAL '20 seconds' ORDER BY p.joined_at`,
+      sql`SELECT id,from_client_id,signal_type,payload FROM meeting_signals WHERE meeting_id=${meeting.id} AND target_client_id=${clientId} AND id>${afterId} ORDER BY id LIMIT 200`,
+      sql`SELECT c.id,c.user_id,c.message,c.created_at,COALESCE(u.name,'Former employee') AS user_name FROM meeting_chat_messages c LEFT JOIN users u ON u.id=c.user_id WHERE c.meeting_id=${meeting.id} AND c.id>${afterMessageId} ORDER BY c.id LIMIT 200`,
+    ]);
+    if(Math.random()<.02)await sql`DELETE FROM meeting_signals WHERE created_at<NOW()-INTERVAL '10 minutes'`;
+    res.json({participants:participants.map(person=>({id:person.client_id,userId:person.user_id,name:person.name,avatarColor:person.avatar_color,media:{mic:person.mic,camera:person.camera}})),signals,messages:messages.map(item=>({id:item.id,userId:item.user_id,userName:item.user_name,message:item.message,createdAt:item.created_at}))});
+  }catch(error){sendError(res,error)}
+});
+
+app.post('/api/meetings/:roomName/live/chat',async(req,res)=>{
+  const roomName=String(req.params.roomName||'').slice(0,180),clientId=String(req.body.client_id||'').slice(0,80),message=String(req.body.message||'').trim().slice(0,1500);
+  if(!clientId||!message)return res.status(400).json({error:'Enter a message'});
+  try{
+    const[source]=await sql`SELECT p.meeting_id FROM meeting_live_participants p JOIN meetings m ON m.id=p.meeting_id WHERE m.room_name=${roomName} AND p.client_id=${clientId} AND p.user_id=${req.user.id} AND p.last_seen>=NOW()-INTERVAL '20 seconds'`;
+    if(!source)return res.status(403).json({error:'Join the meeting before chatting'});
+    const[item]=await sql`INSERT INTO meeting_chat_messages(meeting_id,user_id,message) VALUES(${source.meeting_id},${req.user.id},${message}) RETURNING id,user_id,message,created_at`;
+    res.status(201).json({id:item.id,userId:item.user_id,userName:req.user.name,message:item.message,createdAt:item.created_at});
+  }catch(error){sendError(res,error)}
+});
+
+app.post('/api/meetings/:roomName/live/signal',async(req,res)=>{
+  const roomName=String(req.params.roomName||'').slice(0,180),clientId=String(req.body.client_id||'').slice(0,80),target=String(req.body.target||'').slice(0,80),type=String(req.body.type||'');
+  if(!clientId||!target||!['offer','answer','ice'].includes(type))return res.status(400).json({error:'Invalid meeting signal'});
+  try{
+    const[source]=await sql`SELECT p.meeting_id FROM meeting_live_participants p JOIN meetings m ON m.id=p.meeting_id WHERE m.room_name=${roomName} AND p.client_id=${clientId} AND p.user_id=${req.user.id} AND p.last_seen>=NOW()-INTERVAL '20 seconds'`;
+    if(!source)return res.status(403).json({error:'Join the meeting before signaling'});
+    const[targetParticipant]=await sql`SELECT 1 FROM meeting_live_participants WHERE meeting_id=${source.meeting_id} AND client_id=${target} AND last_seen>=NOW()-INTERVAL '20 seconds'`;
+    if(!targetParticipant)return res.status(404).json({error:'Participant is no longer connected'});
+    await sql`INSERT INTO meeting_signals(meeting_id,from_client_id,target_client_id,signal_type,payload) VALUES(${source.meeting_id},${clientId},${target},${type},${JSON.stringify(req.body.payload||{})}::jsonb)`;
+    res.status(204).end();
+  }catch(error){sendError(res,error)}
+});
+
+app.delete('/api/meetings/:roomName/live/:clientId',async(req,res)=>{
+  const roomName=String(req.params.roomName||'').slice(0,180),clientId=String(req.params.clientId||'').slice(0,80);
+  try{await sql`DELETE FROM meeting_live_participants p USING meetings m WHERE p.meeting_id=m.id AND m.room_name=${roomName} AND p.client_id=${clientId} AND p.user_id=${req.user.id}`;res.status(204).end()}catch(error){sendError(res,error)}
+});
+
 app.patch('/api/meetings/:id', async (req, res) => {
   const id=Number(req.params.id);try{const[current]=await sql`SELECT * FROM meetings WHERE id=${id}`;if(!current)return res.status(404).json({error:'Meeting not found'});if(current.organizer_id!==req.user.id&&['Employee','Guest'].includes(req.user.role))return res.status(403).json({error:'Only the organizer can update this meeting'});const title=req.body.title??current.title,description=req.body.description??current.description,start=req.body.start_at?new Date(req.body.start_at):current.start_at,end=req.body.end_at?new Date(req.body.end_at):current.end_at,status=req.body.status??current.status;if(end<=start)return res.status(400).json({error:'End time must be after start time'});const[item]=await sql`UPDATE meetings SET title=${title},description=${description},start_at=${start},end_at=${end},status=${status} WHERE id=${id} RETURNING *`;const attendees=await sql`SELECT user_id FROM meeting_attendees WHERE meeting_id=${id}`;for(const person of attendees)await addWorkspaceNotification(person.user_id,req.user.id,'meeting',status==='cancelled'?'Meeting cancelled':'Meeting updated',`${item.title} · ${new Date(item.start_at).toLocaleString()}`,null,id);res.json(item);}catch(error){sendError(res,error);}
 });
