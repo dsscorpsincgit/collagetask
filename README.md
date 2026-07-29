@@ -117,7 +117,7 @@ REDIS_URL=your-vercel-marketplace-redis-url
 
 Connect a Redis-compatible store from Vercel Marketplace and provide `REDIS_URL`. This coordinates Socket.IO rooms across Vercel Function instances and is required for dependable multi-user chat, presence, and meeting signaling in production.
 
-For meetings across restrictive networks, also configure organization-controlled `STUN_URL`, `TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL` values. Redeploy after changing `APP_URL` to the final production domain so invitation and meeting links use the correct address.
+DSS Flow uses Google's public STUN service when `STUN_URL` is blank. For dependable meetings across restrictive networks, configure organization-controlled `STUN_URL`, `TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL` values. Redeploy after changing `APP_URL` to the final production domain so invitation and meeting links use the correct address.
 
 Vercel Functions have a 4.5 MB request/response payload limit. On Vercel, DSS Flow therefore accepts one attachment of up to 4 MB per upload request; users can repeat the upload for additional files.
 

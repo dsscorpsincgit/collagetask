@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { io as createSocket } from 'socket.io-client';
+import EnhancedMeetingRoom from './MeetingRoom';
+import { api, realtime } from './realtime';
 import {
   LayoutDashboard, FolderKanban, CheckSquare, Users, UserRoundPlus, Search,
   Bell, Plus, ChevronDown, CalendarDays, MoreHorizontal, X, ArrowUpRight,
@@ -11,14 +12,7 @@ import {
   ChevronLeft, ChevronRight, Mic, MonitorUp, Hand, Copy, Maximize, UsersRound,
 } from 'lucide-react';
 
-const realtime=createSocket({autoConnect:false,path:'/api/realtime'});
 let sharedAudioContext;
-
-const api = async (path, options) => {
-  const response = await fetch(`/api${path}`, { headers: { 'Content-Type': 'application/json' }, ...options });
-  if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || 'Request failed'); }
-  return response.status === 204 ? null : response.json();
-};
 
 const uploadDocuments = async (taskId, files) => {
   if (!files?.length) return;
@@ -188,7 +182,7 @@ function App() {
     {modal === 'meeting' && <MeetingForm data={data} onClose={()=>setModal(null)} onSubmit={createMeeting}/>} 
     {modal === 'instant-meeting' && <InstantMeetingForm data={data} currentUser={authUser} onClose={()=>setModal(null)} onSubmit={payload=>createMeeting(payload,true)}/>} 
     {modal === 'join-meeting' && <JoinMeetingLinkForm onClose={()=>setModal(null)} onJoin={joinMeetingByLink}/>} 
-    {modal?.type === 'meeting-room' && <MeetingRoom meeting={modal.meeting} user={authUser} onClose={()=>setModal(null)}/>} 
+    {modal?.type === 'meeting-room' && <EnhancedMeetingRoom meeting={modal.meeting} user={authUser} users={data.users} onClose={()=>setModal(null)}/>}
     {modal === 'install' && <InstallHelp onClose={()=>setModal(null)}/>} 
     {modal?.type === 'edit-user' && <UserRoleForm user={modal.user} onClose={()=>setModal(null)} onSubmit={patch=>updateUser(modal.user.id,patch)}/>} 
     {modal?.type === 'remove-user' && <RemoveUserConfirm user={modal.user} onClose={()=>setModal(null)} onConfirm={()=>removeUser(modal.user.id)}/>} 
