@@ -462,6 +462,39 @@ app.patch('/api/teams/:id/members',requireWorkspaceManager,async(req,res)=>{
   }catch(error){sendError(res,error)}
 });
 
+app.patch('/api/teams/:id/members/:userId',requireWorkspaceManager,async(req,res)=>{
+  const teamId=Number(req.params.id),userId=Number(req.params.userId),targetTeamId=req.body.target_team_id?Number(req.body.target_team_id):null;
+  if(!teamId||!userId)return res.status(400).json({error:'Choose a valid team member'});
+  if(targetTeamId===teamId)return res.status(400).json({error:'Choose a different destination team'});
+  try{
+    if(!sql){
+      const source=demo.teams.find(item=>item.id===teamId),target=targetTeamId?demo.teams.find(item=>item.id===targetTeamId):null;
+      if(!source)return res.status(404).json({error:'Team not found'});
+      if(!(source.member_ids||[]).includes(userId))return res.status(404).json({error:'This employee is not in the team'});
+      if(targetTeamId&&!target)return res.status(404).json({error:'Destination team not found'});
+      if(target)target.member_ids=[...new Set([...(target.member_ids||[]),userId])];
+      source.member_ids=(source.member_ids||[]).filter(id=>id!==userId);
+      return res.json({member_ids:source.member_ids,target_member_ids:target?.member_ids||null,moved:Boolean(target)});
+    }
+    const[source]=await sql`SELECT t.id,t.name FROM teams t JOIN team_members tm ON tm.team_id=t.id WHERE t.id=${teamId} AND tm.user_id=${userId}`;
+    if(!source)return res.status(404).json({error:'This employee is not in the team'});
+    let target=null,targetChannel=null;
+    if(targetTeamId){
+      [target]=await sql`SELECT id,name FROM teams WHERE id=${targetTeamId}`;
+      if(!target)return res.status(404).json({error:'Destination team not found'});
+      await sql`INSERT INTO team_members(team_id,user_id) VALUES(${targetTeamId},${userId}) ON CONFLICT DO NOTHING`;
+      [targetChannel]=await sql`SELECT id FROM chat_channels WHERE team_id=${targetTeamId} AND channel_type='team' LIMIT 1`;
+      if(!targetChannel)[targetChannel]=await sql`INSERT INTO chat_channels(name,channel_type,team_id,created_by) VALUES(${target.name},'team',${targetTeamId},${req.user.id}) RETURNING id`;
+      await sql`INSERT INTO chat_channel_members(channel_id,user_id) VALUES(${targetChannel.id},${userId}) ON CONFLICT DO NOTHING`;
+    }
+    await sql`DELETE FROM team_members WHERE team_id=${teamId} AND user_id=${userId}`;
+    await sql`DELETE FROM chat_channel_members WHERE user_id=${userId} AND channel_id IN (SELECT id FROM chat_channels WHERE team_id=${teamId} AND channel_type='team')`;
+    const members=await sql`SELECT user_id FROM team_members WHERE team_id=${teamId} ORDER BY user_id`;
+    await addWorkspaceNotification(userId,req.user.id,'team',target?'Moved to another team':'Removed from a team',target?`You were moved from ${source.name} to ${target.name}.`:`You were removed from ${source.name}.`,targetChannel?.id||null,null);
+    res.json({member_ids:members.map(item=>item.user_id),moved:Boolean(target)});
+  }catch(error){sendError(res,error)}
+});
+
 app.get('/api/chat/channels', async (req, res) => {
   try {
     await sql`INSERT INTO chat_message_receipts(message_id,user_id,delivered_at)

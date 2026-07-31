@@ -4,6 +4,7 @@ import App from './App';
 import './styles.css';
 import './login.css';
 import './meeting.css';
+import './team-form.css';
 
 createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>);
 

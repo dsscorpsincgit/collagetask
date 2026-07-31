@@ -1,0 +1,117 @@
+.member-picker-search {
+  height: 40px;
+  margin-bottom: 8px;
+  padding: 0 11px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #dfe4eb;
+  border-radius: 8px;
+  color: #8491a2;
+  background: #fff;
+}
+
+.member-picker-search:focus-within {
+  border-color: #44c5d2;
+  box-shadow: 0 0 0 3px rgba(38, 201, 217, .1);
+}
+
+.field .member-picker-search input {
+  min-width: 0;
+  flex: 1;
+  width: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+.field .member-picker-search input:focus {
+  border: 0;
+  box-shadow: none;
+}
+
+.member-picker-search span {
+  flex: none;
+  font-size: 9px;
+  color: #18aebe;
+}
+
+.member-picker-empty {
+  grid-column: 1 / -1;
+  padding: 22px;
+  border: 1px dashed #dfe4eb;
+  border-radius: 8px;
+  text-align: center;
+  color: #8794a5;
+  font-size: 10px;
+}
+
+.team-member-list.manageable > article {
+  grid-template-columns: 44px minmax(115px, 1fr) 80px 88px minmax(175px, 1.25fr);
+}
+
+.team-member-manage {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) 30px 30px;
+  flex-direction: initial !important;
+  gap: 5px;
+  align-items: center;
+}
+
+.team-member-manage select {
+  min-width: 0;
+  height: 31px;
+  border: 1px solid #dfe5ec;
+  border-radius: 7px;
+  background: #fff;
+  color: #627084;
+  padding: 0 6px;
+  font-size: 9px;
+}
+
+.team-member-manage button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #dfe5ec;
+  border-radius: 7px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.team-member-manage button:disabled {
+  cursor: default;
+  opacity: .42;
+}
+
+.team-member-manage svg {
+  width: 14px;
+}
+
+.team-move-button {
+  color: #19aebe;
+}
+
+.team-remove-button {
+  color: #d85b68;
+}
+
+.team-member-error {
+  margin: 0 22px 10px;
+}
+
+@media (max-width: 600px) {
+  .team-member-list.manageable > article {
+    grid-template-columns: 44px 1fr;
+  }
+
+  .team-member-manage {
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(0, 1fr) 34px 34px;
+  }
+}
