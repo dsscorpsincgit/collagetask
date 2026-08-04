@@ -69,9 +69,10 @@ const brandedEmail=({eyebrow='DSS FLOW',title,greeting,content,buttonLabel='Open
 });
 
 async function sendPush(userId,payload){
-  if(!sql||!pushEnabled||!userId)return;
+  if(!sql||!pushEnabled||!userId)return{sent:0,failed:0};
   const subscriptions=await sql`SELECT id,subscription FROM push_subscriptions WHERE user_id=${userId}`;
-  await Promise.all(subscriptions.map(async row=>{try{await webpush.sendNotification(row.subscription,JSON.stringify(payload),{TTL:86400,urgency:'high'})}catch(error){if([404,410].includes(error.statusCode))await sql`DELETE FROM push_subscriptions WHERE id=${row.id}`;else console.error('Push delivery failed:',error.message)}}));
+  const results=await Promise.all(subscriptions.map(async row=>{try{await webpush.sendNotification(row.subscription,JSON.stringify(payload),{TTL:86400,urgency:'high'});return true}catch(error){if([404,410].includes(error.statusCode))await sql`DELETE FROM push_subscriptions WHERE id=${row.id}`;else console.error('Push delivery failed:',error.message);return false}}));
+  return{sent:results.filter(Boolean).length,failed:results.filter(result=>!result).length};
 }
 
 async function addNotification(userId, actorId, taskId, type, title, message) {
@@ -408,6 +409,7 @@ app.get('/api/push/config',(_req,res)=>res.json({enabled:pushEnabled,public_key:
 app.post('/api/push/subscribe',async(req,res)=>{
   const subscription=req.body?.subscription||req.body,endpoint=String(subscription?.endpoint||'');
   if(!pushEnabled)return res.status(503).json({error:'Mobile push is not configured on the server'});
+  if(!sql)return res.status(503).json({error:'A database connection is required for mobile notifications'});
   if(!endpoint||!subscription?.keys?.p256dh||!subscription?.keys?.auth)return res.status(400).json({error:'Invalid push subscription'});
   try{await sql`INSERT INTO push_subscriptions(user_id,endpoint,subscription,user_agent) VALUES(${req.user.id},${endpoint},${JSON.stringify(subscription)}::jsonb,${String(req.headers['user-agent']||'').slice(0,500)}) ON CONFLICT(endpoint) DO UPDATE SET user_id=${req.user.id},subscription=${JSON.stringify(subscription)}::jsonb,user_agent=${String(req.headers['user-agent']||'').slice(0,500)},updated_at=NOW()`;res.status(201).json({subscribed:true})}catch(error){sendError(res,error)}
 });
@@ -419,7 +421,8 @@ app.post('/api/push/test',async(req,res)=>{
     const title='DSS Flow test notification',message='Mobile and desktop push notifications are working correctly on this device.';
     const[item]=await sql`INSERT INTO notifications(user_id,actor_id,type,title,message) VALUES(${req.user.id},${req.user.id},'message',${title},${message}) RETURNING *`;
     io?.to(`user:${req.user.id}`).emit('notification',item);
-    await sendPush(req.user.id,{notificationId:item.id,title,body:message,type:'message',url:'/',tag:`push-test-${item.id}`,timestamp:Date.now(),forceDisplay:true});
+    const delivery=await sendPush(req.user.id,{notificationId:item.id,title,body:message,type:'message',url:'/',tag:`push-test-${item.id}`,timestamp:Date.now(),forceDisplay:true});
+    if(!delivery.sent)return res.status(503).json({error:'No active push subscription accepted the notification. Enable notifications again on this device.'});
     res.json({sent:true});
   }catch(error){sendError(res,error)}
 });
@@ -503,10 +506,10 @@ app.get('/api/chat/channels', async (req, res) => {
       WHERE cm.user_id<>${req.user.id}
       ON CONFLICT(message_id,user_id) DO UPDATE SET delivered_at=COALESCE(chat_message_receipts.delivered_at,NOW())`;
     const channels = await sql`SELECT c.*,
-      (SELECT COALESCE(NULLIF(cm.message,''),'Attachment') FROM chat_messages cm WHERE cm.channel_id=c.id ORDER BY cm.created_at DESC LIMIT 1) AS last_message,
-      (SELECT COALESCE(u.name,'Former employee') FROM chat_messages cm LEFT JOIN users u ON u.id=cm.user_id WHERE cm.channel_id=c.id ORDER BY cm.created_at DESC LIMIT 1) AS last_sender_name,
-      (SELECT created_at FROM chat_messages cm WHERE cm.channel_id=c.id ORDER BY cm.created_at DESC LIMIT 1) AS last_message_at,
-      (SELECT COUNT(*)::int FROM chat_messages cm WHERE cm.channel_id=c.id AND cm.user_id<>${req.user.id} AND NOT EXISTS(SELECT 1 FROM chat_message_receipts receipt WHERE receipt.message_id=cm.id AND receipt.user_id=${req.user.id} AND receipt.read_at IS NOT NULL)) AS unread_count
+      (SELECT CASE WHEN cm.deleted_for_everyone_at IS NOT NULL THEN 'This message was deleted' ELSE COALESCE(NULLIF(cm.message,''),'Attachment') END FROM chat_messages cm WHERE cm.channel_id=c.id AND NOT EXISTS(SELECT 1 FROM chat_message_hidden hidden WHERE hidden.message_id=cm.id AND hidden.user_id=${req.user.id}) ORDER BY cm.created_at DESC LIMIT 1) AS last_message,
+      (SELECT COALESCE(u.name,'Former employee') FROM chat_messages cm LEFT JOIN users u ON u.id=cm.user_id WHERE cm.channel_id=c.id AND NOT EXISTS(SELECT 1 FROM chat_message_hidden hidden WHERE hidden.message_id=cm.id AND hidden.user_id=${req.user.id}) ORDER BY cm.created_at DESC LIMIT 1) AS last_sender_name,
+      (SELECT created_at FROM chat_messages cm WHERE cm.channel_id=c.id AND NOT EXISTS(SELECT 1 FROM chat_message_hidden hidden WHERE hidden.message_id=cm.id AND hidden.user_id=${req.user.id}) ORDER BY cm.created_at DESC LIMIT 1) AS last_message_at,
+      (SELECT COUNT(*)::int FROM chat_messages cm WHERE cm.channel_id=c.id AND cm.user_id<>${req.user.id} AND cm.deleted_for_everyone_at IS NULL AND NOT EXISTS(SELECT 1 FROM chat_message_hidden hidden WHERE hidden.message_id=cm.id AND hidden.user_id=${req.user.id}) AND NOT EXISTS(SELECT 1 FROM chat_message_receipts receipt WHERE receipt.message_id=cm.id AND receipt.user_id=${req.user.id} AND receipt.read_at IS NOT NULL)) AS unread_count
       FROM chat_channels c
       WHERE EXISTS (SELECT 1 FROM chat_channel_members m WHERE m.channel_id=c.id AND m.user_id=${req.user.id})
       AND (c.channel_type<>'direct' OR (SELECT COUNT(*) FROM chat_channel_members m WHERE m.channel_id=c.id)>1)
@@ -544,15 +547,15 @@ app.get('/api/chat/channels/:id/messages', async (req, res) => {
       SELECT id,${req.user.id},NOW(),NOW() FROM chat_messages WHERE channel_id=${channelId} AND user_id<>${req.user.id}
       ON CONFLICT(message_id,user_id) DO UPDATE SET delivered_at=COALESCE(chat_message_receipts.delivered_at,NOW()),read_at=NOW()`;
     const messages=await sql`SELECT m.*,COALESCE(u.name,'Former employee') AS user_name,u.avatar_color,
-      reply.message AS reply_message,COALESCE(reply_user.name,'Former employee') AS reply_user_name,
+      CASE WHEN reply.deleted_for_everyone_at IS NOT NULL THEN 'This message was deleted' ELSE reply.message END AS reply_message,COALESCE(reply_user.name,'Former employee') AS reply_user_name,
       (SELECT COUNT(*)::int FROM chat_channel_members cm WHERE cm.channel_id=m.channel_id AND cm.user_id<>m.user_id) AS recipient_count,
       (SELECT COUNT(*)::int FROM chat_message_receipts r WHERE r.message_id=m.id AND r.delivered_at IS NOT NULL) AS delivered_count,
       (SELECT COUNT(*)::int FROM chat_message_receipts r WHERE r.message_id=m.id AND r.read_at IS NOT NULL) AS read_count
       FROM chat_messages m LEFT JOIN users u ON u.id=m.user_id
       LEFT JOIN chat_messages reply ON reply.id=m.reply_to_id LEFT JOIN users reply_user ON reply_user.id=reply.user_id
-      WHERE m.channel_id=${channelId} ORDER BY m.created_at LIMIT 300`;
-    const attachments=await sql`SELECT a.id,a.message_id,a.filename,a.mime_type,a.file_size FROM chat_attachments a WHERE a.message_id IN (SELECT id FROM chat_messages WHERE channel_id=${channelId})`;
-    const reactions=await sql`SELECT r.message_id,r.emoji,COUNT(*)::int AS count,BOOL_OR(r.user_id=${req.user.id}) AS reacted FROM chat_message_reactions r WHERE r.message_id IN (SELECT id FROM chat_messages WHERE channel_id=${channelId}) GROUP BY r.message_id,r.emoji ORDER BY MIN(r.created_at)`;
+      WHERE m.channel_id=${channelId} AND NOT EXISTS(SELECT 1 FROM chat_message_hidden hidden WHERE hidden.message_id=m.id AND hidden.user_id=${req.user.id}) ORDER BY m.created_at LIMIT 300`;
+    const attachments=await sql`SELECT a.id,a.message_id,a.filename,a.mime_type,a.file_size FROM chat_attachments a WHERE a.message_id IN (SELECT id FROM chat_messages WHERE channel_id=${channelId} AND deleted_for_everyone_at IS NULL)`;
+    const reactions=await sql`SELECT r.message_id,r.emoji,COUNT(*)::int AS count,BOOL_OR(r.user_id=${req.user.id}) AS reacted FROM chat_message_reactions r WHERE r.message_id IN (SELECT id FROM chat_messages WHERE channel_id=${channelId} AND deleted_for_everyone_at IS NULL) GROUP BY r.message_id,r.emoji ORDER BY MIN(r.created_at)`;
     res.json(messages.map(m=>({...m,attachments:attachments.filter(a=>a.message_id===m.id),reactions:reactions.filter(r=>r.message_id===m.id)})));
   } catch(error){sendError(res,error);}
 });
@@ -570,12 +573,30 @@ app.get('/api/chat/attachments/:id',async(req,res)=>{try{const[file]=await sql`S
 
 app.post('/api/chat/messages/:id/reactions',async(req,res)=>{
   const messageId=Number(req.params.id),emoji=String(req.body.emoji||'').trim().slice(0,20);if(!emoji)return res.status(400).json({error:'Choose a reaction'});
-  try{const[message]=await sql`SELECT m.id,m.channel_id FROM chat_messages m JOIN chat_channel_members cm ON cm.channel_id=m.channel_id WHERE m.id=${messageId} AND cm.user_id=${req.user.id}`;if(!message)return res.status(404).json({error:'Message not found'});const[existing]=await sql`SELECT 1 FROM chat_message_reactions WHERE message_id=${messageId} AND user_id=${req.user.id} AND emoji=${emoji}`;if(existing)await sql`DELETE FROM chat_message_reactions WHERE message_id=${messageId} AND user_id=${req.user.id} AND emoji=${emoji}`;else await sql`INSERT INTO chat_message_reactions(message_id,user_id,emoji) VALUES(${messageId},${req.user.id},${emoji})`;io?.to(`chat:${message.channel_id}`).emit('chat-message',{channel_id:message.channel_id,message_id:messageId});res.json({reacted:!existing});}catch(error){sendError(res,error)}
+  try{const[message]=await sql`SELECT m.id,m.channel_id,m.deleted_for_everyone_at FROM chat_messages m JOIN chat_channel_members cm ON cm.channel_id=m.channel_id WHERE m.id=${messageId} AND cm.user_id=${req.user.id}`;if(!message)return res.status(404).json({error:'Message not found'});if(message.deleted_for_everyone_at)return res.status(409).json({error:'This message was deleted'});const[existing]=await sql`SELECT 1 FROM chat_message_reactions WHERE message_id=${messageId} AND user_id=${req.user.id} AND emoji=${emoji}`;if(existing)await sql`DELETE FROM chat_message_reactions WHERE message_id=${messageId} AND user_id=${req.user.id} AND emoji=${emoji}`;else await sql`INSERT INTO chat_message_reactions(message_id,user_id,emoji) VALUES(${messageId},${req.user.id},${emoji})`;io?.to(`chat:${message.channel_id}`).emit('chat-message',{channel_id:message.channel_id,message_id:messageId});res.json({reacted:!existing});}catch(error){sendError(res,error)}
+});
+
+app.delete('/api/chat/messages/:id',async(req,res)=>{
+  const messageId=Number(req.params.id),scope=req.query.scope==='everyone'?'everyone':'me';
+  try{
+    const[message]=await sql`SELECT m.id,m.channel_id,m.user_id,m.deleted_for_everyone_at FROM chat_messages m JOIN chat_channel_members member ON member.channel_id=m.channel_id WHERE m.id=${messageId} AND member.user_id=${req.user.id}`;
+    if(!message)return res.status(404).json({error:'Message not found'});
+    if(scope==='everyone'){
+      if(Number(message.user_id)!==Number(req.user.id))return res.status(403).json({error:'You can only delete your own messages for everyone'});
+      if(!message.deleted_for_everyone_at){
+        await sql`UPDATE chat_messages SET message='',deleted_for_everyone_at=NOW() WHERE id=${messageId}`;
+        await Promise.all([sql`DELETE FROM chat_attachments WHERE message_id=${messageId}`,sql`DELETE FROM chat_message_reactions WHERE message_id=${messageId}`]);
+      }
+    }else await sql`INSERT INTO chat_message_hidden(message_id,user_id) VALUES(${messageId},${req.user.id}) ON CONFLICT DO NOTHING`;
+    const members=await sql`SELECT user_id FROM chat_channel_members WHERE channel_id=${message.channel_id}`;
+    members.forEach(person=>io?.to(`user:${person.user_id}`).emit('chat-message',{channel_id:message.channel_id,message_id:messageId,deleted:scope}));
+    res.status(204).end();
+  }catch(error){sendError(res,error)}
 });
 
 app.post('/api/chat/messages/:id/forward',async(req,res)=>{
   const sourceId=Number(req.params.id),channelIds=[...new Set((req.body.channel_ids||[]).map(Number).filter(Boolean))].slice(0,20);if(!channelIds.length)return res.status(400).json({error:'Choose at least one conversation'});
-  try{const[source]=await sql`SELECT m.* FROM chat_messages m JOIN chat_channel_members cm ON cm.channel_id=m.channel_id WHERE m.id=${sourceId} AND cm.user_id=${req.user.id}`;if(!source)return res.status(404).json({error:'Message not found'});const created=[];for(const channelId of channelIds){const[member]=await sql`SELECT 1 FROM chat_channel_members WHERE channel_id=${channelId} AND user_id=${req.user.id}`;if(!member)continue;const[item]=await sql`INSERT INTO chat_messages(channel_id,user_id,message,forwarded_from_id) VALUES(${channelId},${req.user.id},${source.message},${sourceId}) RETURNING *`;await sql`INSERT INTO chat_attachments(message_id,filename,mime_type,file_size,content) SELECT ${item.id},filename,mime_type,file_size,content FROM chat_attachments WHERE message_id=${sourceId}`;const recipients=await sql`SELECT user_id FROM chat_channel_members WHERE channel_id=${channelId} AND user_id<>${req.user.id}`;for(const person of recipients)io?.to(`user:${person.user_id}`).emit('chat-message',{channel_id:channelId,message_id:item.id});created.push(item);}res.status(201).json({forwarded:created.length});}catch(error){sendError(res,error)}
+  try{const[source]=await sql`SELECT m.* FROM chat_messages m JOIN chat_channel_members cm ON cm.channel_id=m.channel_id WHERE m.id=${sourceId} AND cm.user_id=${req.user.id}`;if(!source)return res.status(404).json({error:'Message not found'});if(source.deleted_for_everyone_at)return res.status(409).json({error:'This message was deleted'});const created=[];for(const channelId of channelIds){const[member]=await sql`SELECT 1 FROM chat_channel_members WHERE channel_id=${channelId} AND user_id=${req.user.id}`;if(!member)continue;const[item]=await sql`INSERT INTO chat_messages(channel_id,user_id,message,forwarded_from_id) VALUES(${channelId},${req.user.id},${source.message},${sourceId}) RETURNING *`;await sql`INSERT INTO chat_attachments(message_id,filename,mime_type,file_size,content) SELECT ${item.id},filename,mime_type,file_size,content FROM chat_attachments WHERE message_id=${sourceId}`;const recipients=await sql`SELECT user_id FROM chat_channel_members WHERE channel_id=${channelId} AND user_id<>${req.user.id}`;for(const person of recipients)io?.to(`user:${person.user_id}`).emit('chat-message',{channel_id:channelId,message_id:item.id});created.push(item);}res.status(201).json({forwarded:created.length});}catch(error){sendError(res,error)}
 });
 
 app.post('/api/meetings', async (req, res) => {
@@ -591,20 +612,20 @@ app.post('/api/meetings/join', async (req,res)=>{
 });
 
 app.post('/api/meetings/:roomName/live/poll',async(req,res)=>{
-  const roomName=String(req.params.roomName||'').slice(0,180),clientId=String(req.body.client_id||'').slice(0,80),afterId=Math.max(0,Number(req.body.after_id)||0),afterMessageId=Math.max(0,Number(req.body.after_message_id)||0),mic=Boolean(req.body.mic),camera=Boolean(req.body.camera);
+  const roomName=String(req.params.roomName||'').slice(0,180),clientId=String(req.body.client_id||'').slice(0,80),afterId=Math.max(0,Number(req.body.after_id)||0),afterMessageId=Math.max(0,Number(req.body.after_message_id)||0),mic=Boolean(req.body.mic),camera=Boolean(req.body.camera),screenSharing=Boolean(req.body.screenSharing);
   if(!clientId||!/^[a-zA-Z0-9-]+$/.test(clientId))return res.status(400).json({error:'Invalid meeting client'});
   try{
     const[meeting]=await sql`SELECT m.id FROM meetings m JOIN meeting_attendees ma ON ma.meeting_id=m.id AND ma.user_id=${req.user.id} WHERE m.room_name=${roomName} AND m.status<>'cancelled'`;
     if(!meeting)return res.status(403).json({error:'You do not have access to this meeting'});
     await sql`DELETE FROM meeting_live_participants WHERE meeting_id=${meeting.id} AND last_seen<NOW()-INTERVAL '20 seconds'`;
-    await sql`INSERT INTO meeting_live_participants(meeting_id,user_id,client_id,mic_enabled,camera_enabled) VALUES(${meeting.id},${req.user.id},${clientId},${mic},${camera}) ON CONFLICT(meeting_id,client_id) DO UPDATE SET user_id=${req.user.id},mic_enabled=${mic},camera_enabled=${camera},last_seen=NOW()`;
+    await sql`INSERT INTO meeting_live_participants(meeting_id,user_id,client_id,mic_enabled,camera_enabled,screen_sharing) VALUES(${meeting.id},${req.user.id},${clientId},${mic},${camera},${screenSharing}) ON CONFLICT(meeting_id,client_id) DO UPDATE SET user_id=${req.user.id},mic_enabled=${mic},camera_enabled=${camera},screen_sharing=${screenSharing},last_seen=NOW()`;
     const[participants,signals,messages]=await Promise.all([
-      sql`SELECT p.client_id,p.user_id,p.mic_enabled AS mic,p.camera_enabled AS camera,p.joined_at,u.name,u.avatar_color FROM meeting_live_participants p JOIN users u ON u.id=p.user_id WHERE p.meeting_id=${meeting.id} AND p.last_seen>=NOW()-INTERVAL '20 seconds' ORDER BY p.joined_at`,
+      sql`SELECT p.client_id,p.user_id,p.mic_enabled AS mic,p.camera_enabled AS camera,p.screen_sharing,p.joined_at,u.name,u.avatar_color FROM meeting_live_participants p JOIN users u ON u.id=p.user_id WHERE p.meeting_id=${meeting.id} AND p.last_seen>=NOW()-INTERVAL '20 seconds' ORDER BY p.joined_at`,
       sql`SELECT id,from_client_id,signal_type,payload FROM meeting_signals WHERE meeting_id=${meeting.id} AND target_client_id=${clientId} AND id>${afterId} ORDER BY id LIMIT 200`,
       sql`SELECT c.id,c.user_id,c.message,c.created_at,COALESCE(u.name,'Former employee') AS user_name FROM meeting_chat_messages c LEFT JOIN users u ON u.id=c.user_id WHERE c.meeting_id=${meeting.id} AND c.id>${afterMessageId} ORDER BY c.id LIMIT 200`,
     ]);
     if(Math.random()<.02)await sql`DELETE FROM meeting_signals WHERE created_at<NOW()-INTERVAL '10 minutes'`;
-    res.json({participants:participants.map(person=>({id:person.client_id,userId:person.user_id,name:person.name,avatarColor:person.avatar_color,media:{mic:person.mic,camera:person.camera}})),signals,messages:messages.map(item=>({id:item.id,userId:item.user_id,userName:item.user_name,message:item.message,createdAt:item.created_at}))});
+    res.json({participants:participants.map(person=>({id:person.client_id,userId:person.user_id,name:person.name,avatarColor:person.avatar_color,media:{mic:person.mic,camera:person.camera,screenSharing:person.screen_sharing}})),signals,messages:messages.map(item=>({id:item.id,userId:item.user_id,userName:item.user_name,message:item.message,createdAt:item.created_at}))});
   }catch(error){sendError(res,error)}
 });
 

@@ -46,7 +46,7 @@ DSS Flow includes a web app manifest, offline application shell, install prompt,
 
 ## Publishing a new version
 
-Set `APP_VERSION` to a new unique value whenever a release is deployed. You can also set `APP_RELEASE_TITLE` and `APP_RELEASE_NOTES`. On startup, DSS Flow records the version once. When it detects a version newer than the previously recorded release, every active employee receives a branded Zoho email and an in-app notification. Connected clients also detect the new version within five minutes and display an **Update now** banner that clears the old PWA cache and reloads the current application.
+Set `APP_VERSION` to a new unique value whenever a release is deployed. You can also set `APP_RELEASE_TITLE` and `APP_RELEASE_NOTES`. On startup, DSS Flow records the version once. When it detects a version newer than the previously recorded release, every active employee receives an in-app and push notification. Connected clients also check on startup, once per minute, and whenever the app returns to the foreground, then display an **Update now** banner that clears the old PWA cache and reloads the current application.
 
 The first version recorded in a database is treated as the baseline and does not email the whole workspace.
 
@@ -66,17 +66,18 @@ The first version recorded in a database is treated as the baseline and does not
 - Private direct messages between colleagues
 - Persistent team channels automatically created from team membership
 - Live WhatsApp-style messages delivered through authenticated Socket.IO connections
+- Message actions for reply, reaction, forwarding, **Delete for me**, and sender-only **Delete for everyone**
 - Image previews and document uploads in chat (up to five files, 8 MB each)
 - Chat notifications with a dedicated sound pattern and browser notification
 - Calendar-based meeting scheduling with separate date, start-time, and end-time controls
 - Attendee invitations and meeting-update notifications
-- Private in-app browser video rooms using WebRTC, with camera, microphone, screen sharing, and leave controls
+- Private in-app browser video rooms using WebRTC, with camera, microphone, presenter-focused screen sharing, and leave controls
 - A dedicated meeting-notification sound pattern
 - Available, busy, lunch, break, in-meeting, and offline work statuses with an optional note
 
 WebRTC media is peer to peer and meeting signaling stays inside DSS Flow. There is no Jitsi, Zoom, Google Meet, iframe, or external meeting-service integration. Camera and microphone access require HTTPS in production (localhost is allowed for development). For calls across restrictive company networks, configure organization-controlled `STUN_URL`, `TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL` values. When these are blank, DSS Flow attempts a direct peer-to-peer connection.
 
-Browsers require a user interaction before they allow audio. Use **Enable & test custom sounds** in the notification panel once; DSS Flow then plays a different sound pattern for task assignments, chat messages, meetings, questions, documents, and completions.
+Browsers require a user interaction before they allow notifications and audio. Open the notification bell and choose **Enable and send test notification** once on each device; DSS Flow then refreshes that device's push subscription automatically after login.
 
 ## Employee account controls
 

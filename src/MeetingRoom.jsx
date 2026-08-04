@@ -13,16 +13,16 @@ function ParticipantAvatar({person,size=34}) {
 function ParticipantVideo({participant}) {
   const video=useRef(null);
   useEffect(()=>{if(video.current)video.current.srcObject=participant.stream||null},[participant.stream]);
-  const showingVideo=Boolean(participant.stream&&participant.camera!==false&&participant.stream.getVideoTracks().length);
-  return <div className="video-tile remote">
+  const showingVideo=Boolean(participant.stream&&(participant.screenSharing||participant.camera!==false)&&participant.stream.getVideoTracks().length);
+  return <div className={`video-tile remote ${participant.screenSharing?'screen-share-tile':''}`}>
     <video ref={video} autoPlay playsInline/>
     <div className={`camera-placeholder ${showingVideo?'hidden':''}`}><ParticipantAvatar person={participant} size={72}/><strong>{participant.camera===false?'Camera is off':participant.stream?'Connecting video...':'Connecting...'}</strong></div>
-    <span>{participant.name}</span>
+    <span>{participant.name}{participant.screenSharing?' · presenting':''}</span>
   </div>;
 }
 
 export default function EnhancedMeetingRoom({meeting,user,users=[],onClose}) {
-  const localVideo=useRef(null),streamRef=useRef(null),peers=useRef(new Map()),pendingIce=useRef(new Map()),clientId=useRef(crypto.randomUUID()),mediaRef=useRef({mic:true,camera:meeting.meeting_mode!=='voice'}),panelRef=useRef(null);
+  const localVideo=useRef(null),streamRef=useRef(null),screenStreamRef=useRef(null),peers=useRef(new Map()),pendingIce=useRef(new Map()),clientId=useRef(crypto.randomUUID()),mediaRef=useRef({mic:true,camera:meeting.meeting_mode!=='voice',screenSharing:false}),panelRef=useRef(null);
   const[remotes,setRemotes]=useState([]),[roomPeople,setRoomPeople]=useState([]),[mediaStates,setMediaStates]=useState({});
   const[mic,setMic]=useState(true),[camera,setCamera]=useState(meeting.meeting_mode!=='voice'),[sharing,setSharing]=useState(false),[ready,setReady]=useState(false);
   const[error,setError]=useState(''),[mediaWarning,setMediaWarning]=useState(''),[panel,setPanel]=useState(null),[seconds,setSeconds]=useState(0);
@@ -40,12 +40,15 @@ export default function EnhancedMeetingRoom({meeting,user,users=[],onClose}) {
         const config=await api('/webrtc-config');
         let stream;
         try {stream=await navigator.mediaDevices.getUserMedia({video:meeting.meeting_mode!=='voice',audio:true})}
-        catch(mediaError){stream=new MediaStream();setMediaWarning(mediaError.name==='NotAllowedError'?'Camera and microphone are blocked. Allow browser access to share them.':'No camera or microphone is available on this device.')}
+        catch(mediaError){
+          if(meeting.meeting_mode!=='voice')try{stream=await navigator.mediaDevices.getUserMedia({video:false,audio:true});setMediaWarning('Camera is unavailable. You joined with your microphone only.')}catch{/* Report the original media error below. */}
+          if(!stream){stream=new MediaStream();setMediaWarning(mediaError.name==='NotAllowedError'?'Camera and microphone are blocked. Allow browser access to share them.':'No camera or microphone is available on this device.')}
+        }
         if(!active){stream.getTracks().forEach(track=>track.stop());return}
         streamRef.current=stream;
         if(localVideo.current)localVideo.current.srcObject=stream;
         const initialMic=Boolean(stream.getAudioTracks()[0]?.enabled),initialCamera=Boolean(stream.getVideoTracks()[0]?.enabled);
-        mediaRef.current={mic:initialMic,camera:initialCamera};setMic(initialMic);setCamera(initialCamera);setReady(true);
+        mediaRef.current={mic:initialMic,camera:initialCamera,screenSharing:false};setMic(initialMic);setCamera(initialCamera);setReady(true);
         api('/users/me/status',{method:'PATCH',body:JSON.stringify({work_status:'in_meeting'})}).catch(()=>{});
 
         const sendSignal=(target,type,payload)=>api(`/meetings/${encodeURIComponent(meeting.room_name)}/live/signal`,{method:'POST',body:JSON.stringify({client_id:clientId.current,target,type,payload})}).catch(signalError=>{if(signalError.message!=='Participant is no longer connected')console.warn('Meeting signal:',signalError.message)});
@@ -53,12 +56,14 @@ export default function EnhancedMeetingRoom({meeting,user,users=[],onClose}) {
         const getPeer=id=>{
           if(peers.current.has(id))return peers.current.get(id);
           const peer=new RTCPeerConnection(config);
-          stream.getTracks().forEach(track=>peer.addTrack(track,stream));
+          stream.getAudioTracks().forEach(track=>peer.addTrack(track,stream));
+          const outgoingVideo=screenStreamRef.current?.getVideoTracks()[0]||stream.getVideoTracks()[0];
+          if(outgoingVideo)peer.addTrack(outgoingVideo,screenStreamRef.current||stream);
           if(!stream.getAudioTracks().length)peer.addTransceiver('audio',{direction:'recvonly'});
-          if(meeting.meeting_mode!=='voice'&&!stream.getVideoTracks().length)peer.addTransceiver('video',{direction:'recvonly'});
+          if(!stream.getVideoTracks().length)peer.addTransceiver('video',{direction:'sendrecv'});
           peer.onicecandidate=event=>event.candidate&&sendSignal(id,'ice',event.candidate.toJSON());
           peer.ontrack=event=>addRemote(id,event.streams[0]||new MediaStream([event.track]));
-          peer.onconnectionstatechange=()=>{if(['failed','closed','disconnected'].includes(peer.connectionState))setRemotes(current=>current.filter(person=>person.id!==id))};
+          peer.onconnectionstatechange=()=>{if(['failed','closed'].includes(peer.connectionState)){setRemotes(current=>current.filter(person=>person.id!==id));peers.current.delete(id);pendingIce.current.delete(id);knownParticipants.delete(id)}};
           peers.current.set(id,peer);
           return peer;
         };
@@ -91,11 +96,11 @@ export default function EnhancedMeetingRoom({meeting,user,users=[],onClose}) {
       } catch(setupError) {setError(setupError.message||'Unable to connect to the meeting')}
     };
     setup();
-    return()=>{active=false;clearInterval(pollTimer);detachSocket();realtime.emit('leave-meeting',{roomName:meeting.room_name});api(`/meetings/${encodeURIComponent(meeting.room_name)}/live/${clientId.current}`,{method:'DELETE'}).catch(()=>{});streamRef.current?.getTracks().forEach(track=>track.stop());peers.current.forEach(peer=>peer.close());peers.current.clear();pendingIce.current.clear();api('/users/me/status',{method:'PATCH',body:JSON.stringify({work_status:'available'})}).catch(()=>{})};
+    return()=>{active=false;clearInterval(pollTimer);detachSocket();realtime.emit('leave-meeting',{roomName:meeting.room_name});api(`/meetings/${encodeURIComponent(meeting.room_name)}/live/${clientId.current}`,{method:'DELETE'}).catch(()=>{});screenStreamRef.current?.getTracks().forEach(track=>track.stop());streamRef.current?.getTracks().forEach(track=>track.stop());peers.current.forEach(peer=>peer.close());peers.current.clear();pendingIce.current.clear();api('/users/me/status',{method:'PATCH',body:JSON.stringify({work_status:'available'})}).catch(()=>{})};
   },[meeting.room_name,meeting.meeting_mode]);
 
   const toggleTrack=kind=>{const track=streamRef.current?.getTracks().find(item=>item.kind===kind);if(!track)return;track.enabled=!track.enabled;if(kind==='audio'){mediaRef.current={...mediaRef.current,mic:track.enabled};setMic(track.enabled)}else{mediaRef.current={...mediaRef.current,camera:track.enabled};setCamera(track.enabled)}};
-  const share=async()=>{if(sharing)return;try{const display=await navigator.mediaDevices.getDisplayMedia({video:true}),track=display.getVideoTracks()[0];peers.current.forEach(peer=>peer.getSenders().find(sender=>sender.track?.kind==='video')?.replaceTrack(track));if(localVideo.current)localVideo.current.srcObject=display;setSharing(true);track.onended=()=>{const cameraTrack=streamRef.current?.getVideoTracks()[0];peers.current.forEach(peer=>peer.getSenders().find(sender=>sender.track?.kind==='video')?.replaceTrack(cameraTrack));if(localVideo.current)localVideo.current.srcObject=streamRef.current;setSharing(false)}}catch{/* Screen sharing was cancelled. */}};
+  const share=async()=>{if(sharing||!navigator.mediaDevices?.getDisplayMedia)return;try{const display=await navigator.mediaDevices.getDisplayMedia({video:{cursor:'always'},audio:false}),track=display.getVideoTracks()[0];screenStreamRef.current=display;const replaceVideo=nextTrack=>Promise.all([...peers.current.values()].map(peer=>{const sender=peer.getSenders().find(item=>item.track?.kind==='video')||peer.getTransceivers().find(item=>item.receiver.track?.kind==='video')?.sender;return sender?.replaceTrack(nextTrack)}));await replaceVideo(track);if(localVideo.current)localVideo.current.srcObject=display;mediaRef.current={...mediaRef.current,screenSharing:true};setSharing(true);track.onended=async()=>{const cameraTrack=streamRef.current?.getVideoTracks()[0]||null;await replaceVideo(cameraTrack);screenStreamRef.current=null;if(localVideo.current)localVideo.current.srcObject=streamRef.current;mediaRef.current={...mediaRef.current,screenSharing:false};setSharing(false)}}catch{/* Screen sharing was cancelled. */}};
   const toggleHand=()=>{const next=!raised;setRaised(next);realtime.emit('meeting-hand',{roomName:meeting.room_name,raised:next})};
   const sendChat=async event=>{event.preventDefault();const message=chatText.trim();if(!message)return;setChatText('');try{const item=await api(`/meetings/${encodeURIComponent(meeting.room_name)}/live/chat`,{method:'POST',body:JSON.stringify({client_id:clientId.current,message})});setChatMessages(current=>current.some(existing=>String(existing.id)===String(item.id))?current:[...current,item])}catch(chatError){setChatText(message);setError(chatError.message)}};
   const copyInvite=async()=>{const url=new URL(location.href);url.searchParams.set('meeting',meeting.room_name);await navigator.clipboard.writeText(url.toString())};
@@ -119,8 +124,8 @@ export default function EnhancedMeetingRoom({meeting,user,users=[],onClose}) {
     {chatPopup&&<button className="meeting-chat-popup" onClick={()=>setPanel('chat')}><ParticipantAvatar person={{name:chatPopup.userName}}/><span><strong>{chatPopup.userName}</strong><p>{chatPopup.message}</p></span><small>{new Date(chatPopup.createdAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</small></button>}
     <div className="meeting-stage">
       <div className={`internal-video-grid participants-${Math.min(roomPeople.length+1,4)}`}>
-        <div className="video-tile local"><video ref={localVideo} autoPlay muted playsInline/><div className={`camera-placeholder ${camera?'hidden':''}`}><ParticipantAvatar person={user} size={72}/><strong>{mediaWarning||'Camera is off'}</strong></div><span>{user.name} (You)</span>{raised&&<i className="raised-hand-badge">✋</i>}{!ready&&!error&&<div className="video-loading"><div className="loader"/><span>Joining meeting...</span></div>}</div>
-        {roomPeople.map(person=><div className="remote-wrap" key={person.id}><ParticipantVideo participant={{...person,stream:remoteStreams.get(person.id),camera:mediaStates[person.id]?.camera??person.media?.camera}}/>{raisedHands[person.id]&&<i className="raised-hand-badge">✋</i>}</div>)}
+        <div className={`video-tile local ${sharing?'screen-share-tile':''}`}><video ref={localVideo} autoPlay muted playsInline/><div className={`camera-placeholder ${camera||sharing?'hidden':''}`}><ParticipantAvatar person={user} size={72}/><strong>{mediaWarning||'Camera is off'}</strong></div><span>{user.name} (You){sharing?' · presenting':''}</span>{raised&&<i className="raised-hand-badge">✋</i>}{!ready&&!error&&<div className="video-loading"><div className="loader"/><span>Joining meeting...</span></div>}</div>
+        {roomPeople.map(person=><div className={`remote-wrap ${person.media?.screenSharing?'presenting':''}`} key={person.id}><ParticipantVideo participant={{...person,stream:remoteStreams.get(person.id),camera:mediaStates[person.id]?.camera??person.media?.camera,screenSharing:person.media?.screenSharing}}/>{raisedHands[person.id]&&<i className="raised-hand-badge">✋</i>}</div>)}
         {error&&<div className="meeting-error"><Video/><strong>Unable to join</strong><p>{error}</p></div>}
       </div>
       {panel&&<aside className="meeting-side-panel">

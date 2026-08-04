@@ -125,6 +125,14 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 
 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_to_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL;
 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS forwarded_from_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL;
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS deleted_for_everyone_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS chat_message_hidden (
+  message_id INTEGER REFERENCES chat_messages(id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  hidden_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (message_id, user_id)
+);
 
 CREATE TABLE IF NOT EXISTS chat_message_receipts (
   message_id INTEGER REFERENCES chat_messages(id) ON DELETE CASCADE,
@@ -193,10 +201,13 @@ CREATE TABLE IF NOT EXISTS meeting_live_participants (
   client_id VARCHAR(80) NOT NULL,
   mic_enabled BOOLEAN DEFAULT FALSE,
   camera_enabled BOOLEAN DEFAULT FALSE,
+  screen_sharing BOOLEAN DEFAULT FALSE,
   joined_at TIMESTAMPTZ DEFAULT NOW(),
   last_seen TIMESTAMPTZ DEFAULT NOW(),
   PRIMARY KEY (meeting_id, client_id)
 );
+
+ALTER TABLE meeting_live_participants ADD COLUMN IF NOT EXISTS screen_sharing BOOLEAN DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS meeting_signals (
   id BIGSERIAL PRIMARY KEY,
@@ -241,6 +252,7 @@ CREATE INDEX IF NOT EXISTS idx_attachments_task ON task_attachments(task_id);
 CREATE INDEX IF NOT EXISTS idx_messages_task ON task_messages(task_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_channel ON chat_messages(channel_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_chat_message_hidden_user ON chat_message_hidden(user_id, message_id);
 CREATE INDEX IF NOT EXISTS idx_chat_attachments_message ON chat_attachments(message_id);
 CREATE INDEX IF NOT EXISTS idx_chat_members_user ON chat_channel_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_chat_receipts_user ON chat_message_receipts(user_id, read_at);
