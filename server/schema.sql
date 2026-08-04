@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_to_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL;
 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS forwarded_from_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL;
 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS deleted_for_everyone_at TIMESTAMPTZ;
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS chat_message_hidden (
   message_id INTEGER REFERENCES chat_messages(id) ON DELETE CASCADE,

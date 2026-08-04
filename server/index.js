@@ -576,6 +576,22 @@ app.post('/api/chat/messages/:id/reactions',async(req,res)=>{
   try{const[message]=await sql`SELECT m.id,m.channel_id,m.deleted_for_everyone_at FROM chat_messages m JOIN chat_channel_members cm ON cm.channel_id=m.channel_id WHERE m.id=${messageId} AND cm.user_id=${req.user.id}`;if(!message)return res.status(404).json({error:'Message not found'});if(message.deleted_for_everyone_at)return res.status(409).json({error:'This message was deleted'});const[existing]=await sql`SELECT 1 FROM chat_message_reactions WHERE message_id=${messageId} AND user_id=${req.user.id} AND emoji=${emoji}`;if(existing)await sql`DELETE FROM chat_message_reactions WHERE message_id=${messageId} AND user_id=${req.user.id} AND emoji=${emoji}`;else await sql`INSERT INTO chat_message_reactions(message_id,user_id,emoji) VALUES(${messageId},${req.user.id},${emoji})`;io?.to(`chat:${message.channel_id}`).emit('chat-message',{channel_id:message.channel_id,message_id:messageId});res.json({reacted:!existing});}catch(error){sendError(res,error)}
 });
 
+app.patch('/api/chat/messages/:id',async(req,res)=>{
+  const messageId=Number(req.params.id),text=String(req.body.message??'').trim().slice(0,5000);
+  try{
+    const[message]=await sql`SELECT m.id,m.channel_id,m.user_id,m.created_at,m.deleted_for_everyone_at,EXISTS(SELECT 1 FROM chat_attachments attachment WHERE attachment.message_id=m.id) AS has_attachment FROM chat_messages m JOIN chat_channel_members member ON member.channel_id=m.channel_id WHERE m.id=${messageId} AND member.user_id=${req.user.id}`;
+    if(!message)return res.status(404).json({error:'Message not found'});
+    if(Number(message.user_id)!==Number(req.user.id))return res.status(403).json({error:'You can only edit your own messages'});
+    if(message.deleted_for_everyone_at)return res.status(409).json({error:'A deleted message cannot be edited'});
+    if(Date.now()-new Date(message.created_at).getTime()>15*60*1000)return res.status(409).json({error:'Messages can only be edited within 15 minutes of sending'});
+    if(!text&&!message.has_attachment)return res.status(400).json({error:'A message cannot be empty'});
+    const[item]=await sql`UPDATE chat_messages SET message=${text},edited_at=NOW() WHERE id=${messageId} RETURNING *`;
+    const members=await sql`SELECT user_id FROM chat_channel_members WHERE channel_id=${message.channel_id}`;
+    members.forEach(person=>io?.to(`user:${person.user_id}`).emit('chat-message',{channel_id:message.channel_id,message_id:messageId,edited:true}));
+    res.json(item);
+  }catch(error){sendError(res,error)}
+});
+
 app.delete('/api/chat/messages/:id',async(req,res)=>{
   const messageId=Number(req.params.id),scope=req.query.scope==='everyone'?'everyone':'me';
   try{
